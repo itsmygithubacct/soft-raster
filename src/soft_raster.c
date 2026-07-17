@@ -10,6 +10,8 @@
 #include "soft_raster.h"
 #include "font8x16.h"
 
+#include <ctype.h>
+#include <errno.h>
 #include <limits.h>
 #include <math.h>
 #include <stdio.h>
@@ -26,6 +28,14 @@ static bool canvas_ok(const sr_canvas *c)
     return c != NULL && c->px != NULL && c->w > 0 && c->h > 0;
 }
 
+static void reset_clip(sr_canvas *c)
+{
+    c->clip_x0 = 0;
+    c->clip_y0 = 0;
+    c->clip_x1 = c->w;
+    c->clip_y1 = c->h;
+}
+
 /* ---------------------------------------------------------------- canvas */
 
 bool sr_canvas_init(sr_canvas *c, int w, int h)
@@ -34,6 +44,7 @@ bool sr_canvas_init(sr_canvas *c, int w, int h)
     c->px = NULL;
     c->w = 0;
     c->h = 0;
+    reset_clip(c);
     c->owns_px = false;
     if (w <= 0 || h <= 0) return false;
     /* The pixel count must fit an int and the byte count a size_t. */
@@ -45,6 +56,7 @@ bool sr_canvas_init(sr_canvas *c, int w, int h)
     c->w = w;
     c->h = h;
     c->owns_px = true;
+    reset_clip(c);
     return true;
 }
 
@@ -55,6 +67,7 @@ void sr_canvas_wrap(sr_canvas *c, uint32_t *mem, int w, int h)
     c->w = mem != NULL && w > 0 ? w : 0;
     c->h = mem != NULL && h > 0 ? h : 0;
     c->owns_px = false;
+    reset_clip(c);
 }
 
 void sr_canvas_free(sr_canvas *c)
@@ -65,6 +78,40 @@ void sr_canvas_free(sr_canvas *c)
     c->w = 0;
     c->h = 0;
     c->owns_px = false;
+    reset_clip(c);
+}
+
+void sr_canvas_set_clip(sr_canvas *c, int x, int y, int w, int h)
+{
+    if (c == NULL) return;
+    int64_t right = (int64_t)x + w;
+    int64_t bottom = (int64_t)y + h;
+    c->clip_x0 = x < 0 ? 0 : x > c->w ? c->w : x;
+    c->clip_y0 = y < 0 ? 0 : y > c->h ? c->h : y;
+    c->clip_x1 = right < 0 ? 0 : right > c->w ? c->w : (int)right;
+    c->clip_y1 = bottom < 0 ? 0 : bottom > c->h ? c->h : (int)bottom;
+    if (w <= 0 || c->clip_x1 < c->clip_x0) c->clip_x1 = c->clip_x0;
+    if (h <= 0 || c->clip_y1 < c->clip_y0) c->clip_y1 = c->clip_y0;
+}
+
+void sr_canvas_reset_clip(sr_canvas *c)
+{
+    if (c != NULL) reset_clip(c);
+}
+
+bool sr_pack_rgba(const sr_canvas *c, uint8_t *rgba, size_t byte_count)
+{
+    if (!canvas_ok(c) || rgba == NULL) return false;
+    size_t pixels = (size_t)c->w * (size_t)c->h;
+    if (pixels > SIZE_MAX / 4u || byte_count < pixels * 4u) return false;
+    for (size_t i = 0u; i < pixels; i++) {
+        uint32_t pixel = c->px[i];
+        rgba[i * 4u] = (uint8_t)(pixel >> 16);
+        rgba[i * 4u + 1u] = (uint8_t)(pixel >> 8);
+        rgba[i * 4u + 2u] = (uint8_t)pixel;
+        rgba[i * 4u + 3u] = (uint8_t)(pixel >> 24);
+    }
+    return true;
 }
 
 /* ---------------------------------------------------------------- colors */
@@ -112,7 +159,8 @@ void sr_clear(sr_canvas *c, uint32_t rgb)
 
 void sr_px(sr_canvas *c, int x, int y, uint32_t rgb)
 {
-    if (!canvas_ok(c) || x < 0 || x >= c->w || y < 0 || y >= c->h) return;
+    if (!canvas_ok(c) || x < c->clip_x0 || x >= c->clip_x1 ||
+        y < c->clip_y0 || y >= c->clip_y1) return;
     c->px[(size_t)y * (size_t)c->w + (size_t)x] =
         0xff000000u | (rgb & 0x00ffffffu);
 }
@@ -122,7 +170,8 @@ void sr_px(sr_canvas *c, int x, int y, uint32_t rgb)
  * with the same arithmetic-shift fixed-point step the games use. */
 static void blend_px(sr_canvas *c, int x, int y, uint32_t rgb, float a)
 {
-    if (x < 0 || x >= c->w || y < 0 || y >= c->h) return;
+    if (x < c->clip_x0 || x >= c->clip_x1 ||
+        y < c->clip_y0 || y >= c->clip_y1) return;
     int ai = (int)(a * 256.0f + 0.5f);
     if (ai <= 0) return;
     if (ai > 256) ai = 256;
@@ -220,6 +269,27 @@ void sr_fill_circle(sr_canvas *c, float cx, float cy, float r,
     }
 }
 
+void sr_fill_ellipse(sr_canvas *c, float cx, float cy, float rx, float ry,
+                     uint32_t rgb, float alpha)
+{
+    if (!canvas_ok(c) || rx <= 0.0f || ry <= 0.0f) return;
+    int x0 = clip_lo(cx - rx - 1.0f);
+    int x1 = clip_hi(cx + rx + 1.0f, c->w);
+    int y0 = clip_lo(cy - ry - 1.0f);
+    int y1 = clip_hi(cy + ry + 1.0f, c->h);
+    float edge_scale = fminf(rx, ry);
+    for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+            float dx = ((float)x + 0.5f - cx) / rx;
+            float dy = ((float)y + 0.5f - cy) / ry;
+            float coverage = (1.0f - sqrtf(dx * dx + dy * dy)) * edge_scale
+                           + 0.5f;
+            if (coverage <= 0.0f) continue;
+            blend_px(c, x, y, rgb, alpha * fminf(coverage, 1.0f));
+        }
+    }
+}
+
 void sr_ring(sr_canvas *c, float cx, float cy, float r, float width,
              uint32_t rgb, float alpha)
 {
@@ -306,6 +376,35 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
     }
 }
 
+void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
+                    size_t count, uint32_t rgb, float alpha)
+{
+    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u) return;
+    float min_x = xs[0], max_x = xs[0], min_y = ys[0], max_y = ys[0];
+    for (size_t i = 1u; i < count; i++) {
+        min_x = fminf(min_x, xs[i]);
+        max_x = fmaxf(max_x, xs[i]);
+        min_y = fminf(min_y, ys[i]);
+        max_y = fmaxf(max_y, ys[i]);
+    }
+    int x0 = clip_lo(min_x), x1 = clip_hi(max_x, c->w);
+    int y0 = clip_lo(min_y), y1 = clip_hi(max_y, c->h);
+    for (int y = y0; y < y1; y++) {
+        for (int x = x0; x < x1; x++) {
+            float px = (float)x + 0.5f, py = (float)y + 0.5f;
+            bool negative = false, positive = false;
+            for (size_t i = 0u; i < count; i++) {
+                size_t next = i + 1u == count ? 0u : i + 1u;
+                float edge = edge_fn(xs[i], ys[i], xs[next], ys[next], px, py);
+                negative = negative || edge < 0.0f;
+                positive = positive || edge > 0.0f;
+            }
+            if (!(negative && positive))
+                blend_px(c, x, y, rgb, alpha);
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ text */
 
 int sr_text_width(const char *s, int scale)
@@ -313,6 +412,12 @@ int sr_text_width(const char *s, int scale)
     if (s == NULL) return 0;
     if (scale < 1) scale = 1;
     return (int)strlen(s) * SR_FONT_W * scale;
+}
+
+const uint8_t *sr_font_glyph(unsigned char ch)
+{
+    if (ch < 32u || ch > 126u) ch = (unsigned char)'?';
+    return font8x16[ch - 32u];
 }
 
 static void draw_glyph(sr_canvas *c, int x, int y, const unsigned char *glyph,
@@ -338,8 +443,7 @@ void sr_text(sr_canvas *c, float x, float y, const char *s,
     int ix = (int)x, iy = (int)y;
     for (; *s; s++) {
         unsigned char ch = (unsigned char)*s;
-        if (ch < 32 || ch > 126) ch = '?';
-        draw_glyph(c, ix, iy, font8x16[ch - 32], rgb, alpha, scale);
+        draw_glyph(c, ix, iy, sr_font_glyph(ch), rgb, alpha, scale);
         ix += SR_FONT_W * scale;
     }
 }
@@ -507,6 +611,82 @@ void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src)
 }
 
 /* ------------------------------------------------------------------- ppm */
+
+static bool ppm_token(FILE *file, char *buffer, size_t capacity)
+{
+    int byte;
+    size_t length = 0u;
+    if (capacity < 2u) return false;
+    do {
+        byte = fgetc(file);
+        if (byte == '#') {
+            do byte = fgetc(file); while (byte != '\n' && byte != EOF);
+        }
+    } while (byte != EOF && isspace((unsigned char)byte));
+    if (byte == EOF) return false;
+    do {
+        if (length + 1u >= capacity) return false;
+        buffer[length++] = (char)byte;
+        byte = fgetc(file);
+    } while (byte != EOF && !isspace((unsigned char)byte));
+    buffer[length] = '\0';
+    return length > 0u;
+}
+
+static bool parse_positive_int(const char *text, int *value)
+{
+    char *end = NULL;
+    errno = 0;
+    long parsed = strtol(text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || parsed <= 0 ||
+        parsed > INT_MAX)
+        return false;
+    *value = (int)parsed;
+    return true;
+}
+
+bool sr_load_ppm(sr_canvas *c, const char *path)
+{
+    FILE *file = NULL;
+    char token[64];
+    int width, height, maxval;
+    sr_canvas loaded = {0};
+    bool ok = false;
+
+    if (c == NULL) return false;
+    c->px = NULL;
+    c->w = 0;
+    c->h = 0;
+    c->owns_px = false;
+    if (path == NULL || (file = fopen(path, "rb")) == NULL) return false;
+    if (!ppm_token(file, token, sizeof token) || strcmp(token, "P6") != 0 ||
+        !ppm_token(file, token, sizeof token) ||
+        !parse_positive_int(token, &width) ||
+        !ppm_token(file, token, sizeof token) ||
+        !parse_positive_int(token, &height) ||
+        !ppm_token(file, token, sizeof token) ||
+        !parse_positive_int(token, &maxval) || maxval != 255 ||
+        !sr_canvas_init(&loaded, width, height))
+        goto done;
+
+    size_t pixels = (size_t)width * (size_t)height;
+    for (size_t i = 0u; i < pixels; i++) {
+        unsigned char bytes[3];
+        if (fread(bytes, 1u, sizeof bytes, file) != sizeof bytes) goto done;
+        loaded.px[i] = 0xff000000u | sr_rgb(bytes[0], bytes[1], bytes[2]);
+    }
+    *c = loaded;
+    loaded = (sr_canvas){0};
+    ok = true;
+
+done:
+    sr_canvas_free(&loaded);
+    if (fclose(file) != 0) {
+        if (ok) sr_canvas_free(c);
+        ok = false;
+    }
+    return ok;
+}
 
 bool sr_write_ppm(const sr_canvas *c, const char *path)
 {

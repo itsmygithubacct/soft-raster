@@ -2,7 +2,7 @@
 
 `soft-raster` is a small C11 software rasterizer for 32-bit framebuffers:
 anti-aliased primitives, an embedded 8x16 bitmap font, sprite blits with
-per-pixel alpha, and an aspect-preserving letterbox scaler.
+per-pixel alpha, P6 PPM loading, and an aspect-preserving letterbox scaler.
 
 The code was extracted from the software renderer shared by the
 terminal-lander family of terminal games (`terminal_lander`,
@@ -86,7 +86,10 @@ A canvas is a row-major array of `uint32_t` pixels laid out as
 non-positive dimensions and pixel counts that would overflow.
 `sr_canvas_wrap()` points a canvas at caller-owned memory without copying.
 `sr_canvas_free()` releases memory obtained from `sr_canvas_init()` and
-never frees wrapped memory.
+never frees wrapped memory. `sr_canvas_set_clip()` limits subsequent pixel and
+primitive drawing to a rectangle; `sr_canvas_reset_clip()` restores the full
+canvas. `sr_pack_rgba()` converts the native canvas into presenter-friendly
+R,G,B,A byte order.
 
 ## Drawing
 
@@ -96,18 +99,22 @@ between pixel centers receive fractional-coverage anti-aliasing.
 - `sr_fill_rect` — axis-aligned rectangle with anti-aliased edges.
 - `sr_stroke_rect` — rectangle outline built from four bars.
 - `sr_fill_circle` — filled disc with an anti-aliased rim.
+- `sr_fill_ellipse` — filled ellipse with an anti-aliased rim.
 - `sr_ring` — circle outline of a given stroke width.
 - `sr_line` — stroked segment with round caps and coverage from the
   distance to the segment; `dash_on`/`dash_off` give a dash pattern in
   pixels (`0, 0` for solid).
 - `sr_fill_triangle` — filled triangle via edge functions, either winding.
+- `sr_fill_convex` — filled convex polygon from parallel coordinate arrays.
 
 ## Text
 
 `sr_text`, `sr_text_center`, `sr_text_outlined`, and `sr_text_shadow` draw
 with the embedded 8x16 console font at an integer scale factor (clamped to
 at least 1). Characters outside ASCII 32..126 render as `?`.
-`sr_text_width()` returns a string's advance width in pixels.
+`sr_text_width()` returns a string's advance width in pixels. Renderers that
+need custom scaling can read the same embedded bitmap through
+`sr_font_glyph()` instead of carrying another font-table copy.
 
 ## Blits and scaling
 
@@ -122,11 +129,12 @@ at least 1). Characters outside ASCII 32..126 render as `?`.
   nearest-neighbor sampling, preserving aspect ratio, centered, with
   opaque black letterbox bars.
 
-## PPM output
+## PPM images
 
-`sr_write_ppm()` writes the canvas as a binary P6 PPM with the alpha byte
-dropped — handy for debugging and golden-image tests. It is the only
-routine that touches the file system.
+`sr_load_ppm()` reads a binary P6 PPM into an owned canvas, including files
+whose headers contain comments. `sr_write_ppm()` writes the canvas with the
+alpha byte dropped. These are handy for small sprite assets, debugging, and
+golden-image tests; they are the only routines that touch the file system.
 
 ## Font
 

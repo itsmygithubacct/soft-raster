@@ -39,7 +39,7 @@ extern "C" {
 #endif
 
 #define SR_VERSION_MAJOR 0
-#define SR_VERSION_MINOR 1
+#define SR_VERSION_MINOR 2
 #define SR_VERSION_PATCH 0
 
 /* Embedded font glyph cell, before scaling. */
@@ -50,6 +50,10 @@ typedef struct sr_canvas {
     uint32_t *px;  /* row-major 0xAARRGGBB, px[y * w + x] */
     int w;
     int h;
+    int clip_x0;
+    int clip_y0;
+    int clip_x1;
+    int clip_y1;
     bool owns_px;  /* set by sr_canvas_init, cleared by sr_canvas_wrap */
 } sr_canvas;
 
@@ -69,6 +73,11 @@ typedef struct sr_canvas {
 bool sr_canvas_init(sr_canvas *c, int w, int h);
 void sr_canvas_wrap(sr_canvas *c, uint32_t *mem, int w, int h);
 void sr_canvas_free(sr_canvas *c);
+void sr_canvas_set_clip(sr_canvas *c, int x, int y, int w, int h);
+void sr_canvas_reset_clip(sr_canvas *c);
+
+/* Convert the canvas into R,G,B,A byte order for presentation APIs. */
+bool sr_pack_rgba(const sr_canvas *c, uint8_t *rgba, size_t byte_count);
 
 /* Color helpers: pack channels, linear mix by t in [0,1], multiply by k in
  * [0,2] with per-channel saturation. */
@@ -104,6 +113,8 @@ void sr_stroke_rect(sr_canvas *c, float x, float y, float w, float h,
                     float line, uint32_t rgb, float alpha);
 void sr_fill_circle(sr_canvas *c, float cx, float cy, float r,
                     uint32_t rgb, float alpha);
+void sr_fill_ellipse(sr_canvas *c, float cx, float cy, float rx, float ry,
+                     uint32_t rgb, float alpha);
 void sr_ring(sr_canvas *c, float cx, float cy, float r, float width,
              uint32_t rgb, float alpha);
 void sr_line(sr_canvas *c, float x0, float y0, float x1, float y1,
@@ -111,6 +122,8 @@ void sr_line(sr_canvas *c, float x0, float y0, float x1, float y1,
              int dash_on, int dash_off);
 void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
                       float x2, float y2, uint32_t rgb, float alpha);
+void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
+                    size_t count, uint32_t rgb, float alpha);
 
 /*
  * Text over the embedded 8x16 font (ASCII 32..126; anything else renders
@@ -120,6 +133,7 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
  * black drop shadow offset by one scaled pixel at 75% of alpha.
  */
 int  sr_text_width(const char *s, int scale);
+const uint8_t *sr_font_glyph(unsigned char ch);
 void sr_text(sr_canvas *c, float x, float y, const char *s,
              uint32_t rgb, float alpha, int scale);
 void sr_text_center(sr_canvas *c, float cx, float y, const char *s,
@@ -158,8 +172,13 @@ void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
                     int w, int h, float alpha);
 void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src);
 
-/* Writes the canvas as a binary P6 PPM (alpha dropped).  Returns false on
- * an empty canvas or any I/O failure. */
+/* Loads a binary P6 PPM into a newly allocated canvas.  Comments and arbitrary
+ * header whitespace are accepted; maxval must be 255.  *c is reset on entry
+ * and owns its pixels on success. */
+bool sr_load_ppm(sr_canvas *c, const char *path);
+
+/* Writes the canvas as a binary P6 PPM (alpha dropped).  Returns false on an
+ * empty canvas or any I/O failure. */
 bool sr_write_ppm(const sr_canvas *c, const char *path);
 
 #ifdef __cplusplus

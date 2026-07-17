@@ -74,6 +74,29 @@ test_wrap_does_not_free_caller_memory(void)
 }
 
 static bool
+test_clip_and_rgba_pack(void)
+{
+    sr_canvas c;
+    uint8_t rgba[4u * 4u * 4u] = {0};
+
+    CHECK(sr_canvas_init(&c, 4, 4));
+    sr_clear(&c, 0x102030u);
+    sr_canvas_set_clip(&c, 1, 1, 2, 2);
+    sr_px(&c, 0, 0, 0xffffffu);
+    sr_fill_rect(&c, 0.0f, 0.0f, 4.0f, 4.0f, 0xa0b0c0u, 1.0f);
+    CHECK(px_at(&c, 0, 0) == 0xff102030u);
+    CHECK(px_at(&c, 1, 1) == 0xffa0b0c0u);
+    CHECK(px_at(&c, 3, 3) == 0xff102030u);
+    sr_canvas_reset_clip(&c);
+    sr_px(&c, 0, 0, 0x010203u);
+    CHECK(sr_pack_rgba(&c, rgba, sizeof rgba));
+    CHECK(rgba[0] == 1u && rgba[1] == 2u && rgba[2] == 3u && rgba[3] == 255u);
+    CHECK(!sr_pack_rgba(&c, rgba, sizeof rgba - 1u));
+    sr_canvas_free(&c);
+    return true;
+}
+
+static bool
 test_clipped_pixel_stores(void)
 {
     sr_canvas c;
@@ -278,6 +301,30 @@ test_fill_triangle(void)
 }
 
 static bool
+test_ellipse_and_convex_fill(void)
+{
+    sr_canvas c;
+    static const float xs[] = {2.0f, 12.0f, 10.0f, 4.0f};
+    static const float ys[] = {2.0f, 3.0f, 12.0f, 11.0f};
+
+    CHECK(sr_canvas_init(&c, 16, 16));
+    sr_clear(&c, 0x000000u);
+    sr_fill_ellipse(&c, 8.0f, 8.0f, 6.0f, 3.0f, 0xffffffu, 1.0f);
+    CHECK(red_at(&c, 8, 8) == 255);
+    CHECK(red_at(&c, 13, 8) > 0);
+    CHECK(red_at(&c, 8, 11) == 0);
+    CHECK(red_at(&c, 0, 8) == 0);
+
+    sr_clear(&c, 0x000000u);
+    sr_fill_convex(&c, xs, ys, 4u, 0xffffffu, 1.0f);
+    CHECK(red_at(&c, 7, 7) == 255);
+    CHECK(red_at(&c, 0, 0) == 0);
+    CHECK(red_at(&c, 14, 14) == 0);
+    sr_canvas_free(&c);
+    return true;
+}
+
+static bool
 test_text_metrics_and_glyph_bits(void)
 {
     /* the embedded font's 'A', copied from the table: 16 rows, MSB is the
@@ -291,6 +338,8 @@ test_text_metrics_and_glyph_bits(void)
     CHECK(sr_text_width("AB", 2) == 2 * SR_FONT_W * 2);
     CHECK(sr_text_width("", 1) == 0);
     CHECK(sr_text_width("A", 0) == SR_FONT_W);  /* scale clamps to 1 */
+    CHECK(memcmp(sr_font_glyph('A'), glyph_a, sizeof glyph_a) == 0);
+    CHECK(memcmp(sr_font_glyph(1u), sr_font_glyph('?'), SR_FONT_H) == 0);
 
     CHECK(sr_canvas_init(&c, 16, 20));
     sr_clear(&c, 0x000000u);
@@ -575,6 +624,15 @@ test_ppm_round_trip(void)
     CHECK(bytes[15] == 0x00 && bytes[16] == 0x00 && bytes[17] == 0x00);
 
     CHECK(!sr_write_ppm(NULL, path));
+
+    sr_canvas loaded;
+    CHECK(sr_load_ppm(&loaded, path));
+    CHECK(loaded.w == 3 && loaded.h == 2 && loaded.owns_px);
+    CHECK(px_at(&loaded, 0, 0) == 0xff102030u);
+    CHECK(px_at(&loaded, 2, 1) == 0xff000000u);
+    sr_canvas_free(&loaded);
+    CHECK(!sr_load_ppm(&loaded, "build/does-not-exist.ppm"));
+    CHECK(loaded.px == NULL && loaded.w == 0 && loaded.h == 0);
     return true;
 }
 
@@ -591,6 +649,7 @@ main(void)
     static const test_case tests[] = {
         {"canvas lifecycle and overflow guard", test_canvas_lifecycle_and_overflow},
         {"wrap does not free caller memory", test_wrap_does_not_free_caller_memory},
+        {"clip and RGBA pack", test_clip_and_rgba_pack},
         {"clipped pixel stores", test_clipped_pixel_stores},
         {"blend math", test_blend_math},
         {"color helpers", test_color_helpers},
@@ -599,13 +658,14 @@ main(void)
         {"ring coverage", test_ring_coverage},
         {"line width, dash, and coverage", test_line_width_dash_and_coverage},
         {"fill_triangle", test_fill_triangle},
+        {"ellipse and convex fill", test_ellipse_and_convex_fill},
         {"text metrics and glyph bits", test_text_metrics_and_glyph_bits},
         {"text outline and shadow", test_text_outline_and_shadow},
         {"blit clipping at all edges", test_blit_clipping_all_edges},
         {"blit alpha and tint", test_blit_alpha_and_tint},
         {"scaled blit dimensions", test_blit_scaled_dimensions},
         {"letterbox scaler geometry", test_letterbox_scaler_geometry},
-        {"PPM writer round-trip", test_ppm_round_trip}
+        {"PPM load/write round-trip", test_ppm_round_trip}
     };
     size_t passed = 0u;
     size_t index;
