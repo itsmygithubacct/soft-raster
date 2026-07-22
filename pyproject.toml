@@ -1,0 +1,41 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "soft-raster-py"
+version = "0.1.0"
+description = "Ownership-safe Python bindings for the soft-raster C library"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {file = "LICENSE"}
+authors = [{name = "soft-raster-py contributors"}]
+keywords = ["graphics", "rasterizer", "framebuffer", "kitty", "games"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3 :: Only",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Topic :: Multimedia :: Graphics",
+  "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/itsmygithubacct/soft-raster-py"
+Repository = "https://github.com/itsmygithubacct/soft-raster-py.git"
+Issues = "https://github.com/itsmygithubacct/soft-raster-py/issues"
+"Native library" = "https://github.com/itsmygithubacct/soft-raster"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+soft_raster = ["py.typed", "_libs/*.so", "_libs/*.dylib", "_libs/*.dll"]
