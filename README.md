@@ -76,9 +76,9 @@ A canvas is a row-major array of `uint32_t` pixels laid out as
 - On a canvas that starts fully transparent (`sr_canvas_init()` zeroes its
   pixels), drawing therefore builds a premultiplied-alpha sprite: RGB
   carries color scaled by coverage and the high byte carries coverage.
-  `sr_blit_alpha()`, `sr_blit_tint()`, and `sr_blit_scaled()` composite
-  such sprites over another canvas using that per-pixel alpha, optionally
-  multiplied by a uniform alpha.
+  `sr_blit_alpha()`, `sr_blit_tint()`, `sr_blit_scaled()`, and
+  `sr_blit_transformed()` composite such sprites over another canvas using
+  that per-pixel alpha, optionally multiplied by a uniform alpha.
 
 ## Canvas
 
@@ -125,6 +125,10 @@ need custom scaling can read the same embedded bitmap through
   using source alpha purely as a mask.
 - `sr_blit_scaled` — nearest-neighbor resample into a destination
   rectangle, composited like `sr_blit_alpha`.
+- `sr_blit_transformed` — whole-source alpha composite with any combination
+  of horizontal, vertical, and diagonal-exchange flags. Diagonal exchange
+  runs first and swaps the output dimensions; optional tint uses source alpha
+  as a mask. The flag values match Tiled's compact transform order.
 - `sr_scale_canvas` — scales the whole source onto the destination with
   nearest-neighbor sampling, preserving aspect ratio, centered, with
   opaque black letterbox bars.
@@ -155,7 +159,8 @@ The build produces static and shared libraries. Applications may instead
 compile `src/soft_raster.c` directly. The library depends only on the C
 standard library and `libm`; nothing in it requires POSIX.
 
-The API is pre-1.0 and may change between minor releases.
+The API is pre-1.0 and may change between minor releases. Version 0.3.0 adds
+the transformed whole-canvas blit API without changing existing calls.
 
 ## License
 

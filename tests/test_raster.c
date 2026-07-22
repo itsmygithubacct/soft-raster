@@ -1,6 +1,7 @@
 #include "soft_raster.h"
 
 #include <limits.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <string.h>
@@ -534,6 +535,138 @@ test_blit_scaled_dimensions(void)
 }
 
 static bool
+test_blit_transformed_all_combinations(void)
+{
+    static const uint32_t expected[8][6] = {
+        {0xffff0000u, 0xff00ff00u, 0xff0000ffu,
+         0xffffff00u, 0xffff00ffu, 0xff00ffffu},
+        {0xff0000ffu, 0xff00ff00u, 0xffff0000u,
+         0xff00ffffu, 0xffff00ffu, 0xffffff00u},
+        {0xffffff00u, 0xffff00ffu, 0xff00ffffu,
+         0xffff0000u, 0xff00ff00u, 0xff0000ffu},
+        {0xff00ffffu, 0xffff00ffu, 0xffffff00u,
+         0xff0000ffu, 0xff00ff00u, 0xffff0000u},
+        {0xffff0000u, 0xffffff00u, 0xff00ff00u,
+         0xffff00ffu, 0xff0000ffu, 0xff00ffffu},
+        {0xffffff00u, 0xffff0000u, 0xffff00ffu,
+         0xff00ff00u, 0xff00ffffu, 0xff0000ffu},
+        {0xff0000ffu, 0xff00ffffu, 0xff00ff00u,
+         0xffff00ffu, 0xffff0000u, 0xffffff00u},
+        {0xff00ffffu, 0xff0000ffu, 0xffff00ffu,
+         0xff00ff00u, 0xffffff00u, 0xffff0000u}
+    };
+    static const int widths[8] = {3, 3, 3, 3, 2, 2, 2, 2};
+    static const int heights[8] = {2, 2, 2, 2, 3, 3, 3, 3};
+    static const uint32_t colors[6] = {
+        0xff0000u, 0x00ff00u, 0x0000ffu,
+        0xffff00u, 0xff00ffu, 0x00ffffu
+    };
+    sr_canvas dst, src;
+
+    CHECK(sr_canvas_init(&src, 3, 2));
+    CHECK(sr_canvas_init(&dst, 7, 7));
+    for (int i = 0; i < 6; i++)
+        sr_px(&src, i % 3, i / 3, colors[i]);
+
+    for (uint8_t transform = 0u; transform < 8u; transform++) {
+        sr_clear(&dst, 0x101010u);
+        sr_blit_transformed(&dst, &src, 2, 2, transform, 1.0f, false,
+                            0xabcdefu);
+        for (int y = 0; y < dst.h; y++)
+            for (int x = 0; x < dst.w; x++) {
+                bool inside = x >= 2 && x < 2 + widths[transform] &&
+                              y >= 2 && y < 2 + heights[transform];
+                if (inside) {
+                    int index = (y - 2) * widths[transform] + (x - 2);
+                    CHECK(px_at(&dst, x, y) == expected[transform][index]);
+                } else {
+                    CHECK(px_at(&dst, x, y) == 0xff101010u);
+                }
+            }
+    }
+
+    sr_canvas_free(&src);
+    sr_canvas_free(&dst);
+    return true;
+}
+
+static bool
+test_blit_transformed_composition_and_clipping(void)
+{
+    sr_canvas dst, spr;
+
+    CHECK(sr_canvas_init(&spr, 2, 1));
+    sr_px(&spr, 0, 0, 0xff0000u);
+    sr_blend(&spr, 1, 0, 0xff0000u, 0.5f);
+    CHECK(sr_canvas_init(&dst, 4, 4));
+
+    /* Diagonal exchange turns the 2x1 source into a 1x2 output. */
+    sr_clear(&dst, 0x0000ffu);
+    sr_blit_transformed(&dst, &spr, 1, 1, SR_TRANSFORM_FLIP_DIAGONAL,
+                        0.5f, false, 0x00ff00u);
+    CHECK(px_at(&dst, 1, 1) == 0xff80007fu);
+    CHECK(px_at(&dst, 1, 2) == 0xff3f00c0u);
+    CHECK(px_at(&dst, 2, 1) == 0xff0000ffu);
+
+    sr_clear(&dst, 0xffffffu);
+    sr_blit_transformed(&dst, &spr, 1, 1, SR_TRANSFORM_FLIP_DIAGONAL,
+                        1.0f, true, 0x00ff00u);
+    CHECK(px_at(&dst, 1, 1) == 0xff00ff00u);
+    CHECK(px_at(&dst, 1, 2) == 0xff80ff80u);
+
+    /* Alpha clamps above one, while zero, negative, and NaN are no-ops. */
+    sr_clear(&dst, 0x000000u);
+    sr_blit_transformed(&dst, &spr, 0, 0, 0u, 2.0f, false, 0u);
+    CHECK(px_at(&dst, 0, 0) == 0xffff0000u);
+    sr_clear(&dst, 0x000000u);
+    sr_blit_transformed(&dst, &spr, 0, 0, 0u, 0.0f, false, 0u);
+    sr_blit_transformed(&dst, &spr, 0, 0, 0u, -1.0f, false, 0u);
+    sr_blit_transformed(&dst, &spr, 0, 0, 0u, NAN, false, 0u);
+    CHECK(px_at(&dst, 0, 0) == 0xff000000u);
+
+    sr_canvas_free(&spr);
+
+    CHECK(sr_canvas_init(&spr, 3, 2));
+    for (int i = 0; i < 6; i++)
+        sr_px(&spr, i % 3, i / 3, (uint32_t)(i + 1) * 0x10101u);
+
+    /* Top-left clip preserves transformed coordinates (AD/BE/CF). */
+    sr_clear(&dst, 0x000000u);
+    sr_blit_transformed(&dst, &spr, -1, -1, SR_TRANSFORM_FLIP_DIAGONAL,
+                        1.0f, false, 0u);
+    CHECK(px_at(&dst, 0, 0) == 0xff050505u);
+    CHECK(px_at(&dst, 0, 1) == 0xff060606u);
+    CHECK(px_at(&dst, 1, 0) == 0xff000000u);
+
+    /* Bottom-right clip covers only the visible A/B segment. */
+    sr_clear(&dst, 0x000000u);
+    sr_blit_transformed(&dst, &spr, 3, 2, SR_TRANSFORM_FLIP_DIAGONAL,
+                        1.0f, false, 0u);
+    CHECK(px_at(&dst, 3, 2) == 0xff010101u);
+    CHECK(px_at(&dst, 3, 3) == 0xff020202u);
+    CHECK(px_at(&dst, 2, 3) == 0xff000000u);
+
+    /* Entirely off-canvas and unknown flag combinations are deterministic
+     * no-ops, including coordinates at both signed-int extremes. */
+    sr_clear(&dst, 0x123456u);
+    sr_blit_transformed(&dst, &spr, INT_MAX, 0,
+                        SR_TRANSFORM_FLIP_DIAGONAL, 1.0f, false, 0u);
+    sr_blit_transformed(&dst, &spr, INT_MIN, 0,
+                        SR_TRANSFORM_FLIP_DIAGONAL, 1.0f, false, 0u);
+    sr_blit_transformed(&dst, &spr, 0, INT_MAX,
+                        SR_TRANSFORM_FLIP_DIAGONAL, 1.0f, false, 0u);
+    sr_blit_transformed(&dst, &spr, 0, INT_MIN,
+                        SR_TRANSFORM_FLIP_DIAGONAL, 1.0f, false, 0u);
+    sr_blit_transformed(&dst, &spr, 0, 0, UINT8_C(8), 1.0f, false, 0u);
+    for (int i = 0; i < 16; i++)
+        CHECK(dst.px[i] == 0xff123456u);
+
+    sr_canvas_free(&spr);
+    sr_canvas_free(&dst);
+    return true;
+}
+
+static bool
 test_letterbox_scaler_geometry(void)
 {
     sr_canvas dst, src;
@@ -664,6 +797,9 @@ main(void)
         {"blit clipping at all edges", test_blit_clipping_all_edges},
         {"blit alpha and tint", test_blit_alpha_and_tint},
         {"scaled blit dimensions", test_blit_scaled_dimensions},
+        {"transformed blit combinations", test_blit_transformed_all_combinations},
+        {"transformed blit composition and clipping",
+         test_blit_transformed_composition_and_clipping},
         {"letterbox scaler geometry", test_letterbox_scaler_geometry},
         {"PPM load/write round-trip", test_ppm_round_trip}
     };

@@ -26,8 +26,8 @@
  * - On a canvas that starts fully transparent (sr_canvas_init() zeroes the
  *   pixels), drawing therefore builds a premultiplied-alpha sprite: RGB
  *   carries color scaled by coverage and the high byte carries coverage.
- *   sr_blit_alpha() and sr_blit_tint() composite such sprites over another
- *   canvas using that per-pixel alpha.
+ *   sr_blit_alpha(), sr_blit_tint(), and sr_blit_transformed() composite
+ *   such sprites over another canvas using that per-pixel alpha.
  */
 
 #include <stdbool.h>
@@ -39,7 +39,7 @@ extern "C" {
 #endif
 
 #define SR_VERSION_MAJOR 0
-#define SR_VERSION_MINOR 2
+#define SR_VERSION_MINOR 3
 #define SR_VERSION_PATCH 0
 
 /* Embedded font glyph cell, before scaling. */
@@ -56,6 +56,18 @@ typedef struct sr_canvas {
     int clip_y1;
     bool owns_px;  /* set by sr_canvas_init, cleared by sr_canvas_wrap */
 } sr_canvas;
+
+/*
+ * Whole-canvas sprite transforms.  The bit values and operation order match
+ * Tiled's orthogonal/isometric tile flags: exchange x/y first, then flip the
+ * transformed image horizontally and vertically.  A diagonal exchange swaps
+ * the output width and height.
+ */
+enum {
+    SR_TRANSFORM_FLIP_HORIZONTAL = UINT8_C(1) << 0,
+    SR_TRANSFORM_FLIP_VERTICAL = UINT8_C(1) << 1,
+    SR_TRANSFORM_FLIP_DIAGONAL = UINT8_C(1) << 2
+};
 
 /*
  * Canvas lifetime
@@ -159,6 +171,11 @@ void sr_text_shadow(sr_canvas *c, float x, float y, const char *s,
  * - sr_blit_scaled: nearest-neighbor resample of the whole source into the
  *   w*h destination rectangle (source x = dst x * src_w / w), composited
  *   like sr_blit_alpha.
+ * - sr_blit_transformed: composites the whole source after applying any
+ *   combination of SR_TRANSFORM_FLIP_* bits.  Diagonal exchange is applied
+ *   first and swaps the output dimensions.  tint_enabled selects either
+ *   normal premultiplied-source compositing or source-alpha masking with rgb.
+ *   Unknown transform bits make the call a no-op.
  * - sr_scale_canvas: scales the whole source onto the destination with
  *   nearest-neighbor sampling, preserving aspect ratio, centered, with
  *   opaque black letterbox bars; output alpha is forced opaque.
@@ -170,6 +187,9 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
                   uint32_t rgb, float alpha);
 void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
                     int w, int h, float alpha);
+void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
+                         uint8_t transform, float alpha, bool tint_enabled,
+                         uint32_t rgb);
 void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src);
 
 /* Loads a binary P6 PPM into a newly allocated canvas.  Comments and arbitrary

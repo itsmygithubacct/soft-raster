@@ -512,6 +512,24 @@ static void composite_px(uint32_t *to, uint32_t s, int ga)
           ((uint32_t)g << 8) | (uint32_t)b;
 }
 
+static void composite_tint_px(uint32_t *to, uint32_t s, int ga,
+                              uint32_t rgb)
+{
+    int sa = ((int)(s >> 24) * ga) / 255;
+    if (sa <= 0) return;
+    int inv = 255 - sa;
+    uint32_t d = *to;
+    int tr = (int)((rgb >> 16) & 255u);
+    int tg = (int)((rgb >> 8) & 255u);
+    int tb = (int)(rgb & 255u);
+    int r = (tr * sa + (int)((d >> 16) & 255u) * inv) / 255;
+    int g = (tg * sa + (int)((d >> 8) & 255u) * inv) / 255;
+    int b = (tb * sa + (int)(d & 255u) * inv) / 255;
+    int a = sa + ((int)(d >> 24) * inv) / 255;
+    *to = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
+          ((uint32_t)g << 8) | (uint32_t)b;
+}
+
 void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,
                    float alpha)
 {
@@ -537,9 +555,6 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
     if (!canvas_ok(dst) || !canvas_ok(src) || alpha <= 0.0f) return;
     if (x <= -src->w || y <= -src->h || x >= dst->w || y >= dst->h) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
-    int tr = (int)((rgb >> 16) & 255u);
-    int tg = (int)((rgb >> 8) & 255u);
-    int tb = (int)(rgb & 255u);
     int sx0 = x < 0 ? -x : 0;
     int sy0 = y < 0 ? -y : 0;
     int sx1 = src->w < dst->w - x ? src->w : dst->w - x;
@@ -547,18 +562,9 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
     for (int sy = sy0; sy < sy1; sy++) {
         for (int sx = sx0; sx < sx1; sx++) {
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
-            int sa = ((int)(s >> 24) * ga) / 255;
-            if (sa <= 0) continue;
-            int inv = 255 - sa;
             uint32_t *to = &dst->px[(size_t)(y + sy) * (size_t)dst->w +
                                     (size_t)(x + sx)];
-            uint32_t d = *to;
-            int r = (tr * sa + (int)((d >> 16) & 255u) * inv) / 255;
-            int g = (tg * sa + (int)((d >> 8) & 255u) * inv) / 255;
-            int b = (tb * sa + (int)(d & 255u) * inv) / 255;
-            int a = sa + ((int)(d >> 24) * inv) / 255;
-            *to = ((uint32_t)a << 24) | ((uint32_t)r << 16) |
-                  ((uint32_t)g << 8) | (uint32_t)b;
+            composite_tint_px(to, s, ga, rgb);
         }
     }
 }
@@ -581,6 +587,68 @@ void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
             composite_px(&dst->px[(size_t)(y + dy) * (size_t)dst->w +
                                   (size_t)(x + dx)], s, ga);
+        }
+    }
+}
+
+void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
+                         uint8_t transform, float alpha, bool tint_enabled,
+                         uint32_t rgb)
+{
+    const uint8_t known = SR_TRANSFORM_FLIP_HORIZONTAL |
+                          SR_TRANSFORM_FLIP_VERTICAL |
+                          SR_TRANSFORM_FLIP_DIAGONAL;
+    int output_w;
+    int output_h;
+    int tx0;
+    int ty0;
+    int tx1;
+    int ty1;
+    int ga;
+
+    if (!canvas_ok(dst) || !canvas_ok(src) || !(alpha > 0.0f) ||
+        (transform & (uint8_t)~known) != 0u) return;
+    output_w = (transform & SR_TRANSFORM_FLIP_DIAGONAL) != 0u
+        ? src->h : src->w;
+    output_h = (transform & SR_TRANSFORM_FLIP_DIAGONAL) != 0u
+        ? src->w : src->h;
+    if ((int64_t)x + output_w <= 0 || (int64_t)y + output_h <= 0 ||
+        x >= dst->w || y >= dst->h) return;
+    ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+    tx0 = x < 0 ? (int)(-(int64_t)x) : 0;
+    ty0 = y < 0 ? (int)(-(int64_t)y) : 0;
+    tx1 = (int64_t)output_w < (int64_t)dst->w - x
+        ? output_w : (int)((int64_t)dst->w - x);
+    ty1 = (int64_t)output_h < (int64_t)dst->h - y
+        ? output_h : (int)((int64_t)dst->h - y);
+
+    for (int ty = ty0; ty < ty1; ty++) {
+        for (int tx = tx0; tx < tx1; tx++) {
+            int sx = tx;
+            int sy = ty;
+            int dx;
+            int dy;
+            uint32_t s;
+            uint32_t *to;
+
+            /* Invert forward diagonal, horizontal, vertical order. */
+            if ((transform & SR_TRANSFORM_FLIP_HORIZONTAL) != 0u)
+                sx = output_w - 1 - sx;
+            if ((transform & SR_TRANSFORM_FLIP_VERTICAL) != 0u)
+                sy = output_h - 1 - sy;
+            if ((transform & SR_TRANSFORM_FLIP_DIAGONAL) != 0u) {
+                int temporary = sx;
+                sx = sy;
+                sy = temporary;
+            }
+            dx = (int)((int64_t)x + tx);
+            dy = (int)((int64_t)y + ty);
+            s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
+            to = &dst->px[(size_t)dy * (size_t)dst->w + (size_t)dx];
+            if (tint_enabled)
+                composite_tint_px(to, s, ga, rgb);
+            else
+                composite_px(to, s, ga);
         }
     }
 }
