@@ -31,6 +31,16 @@ clipped stores, blend fixed-point math, edge coverage of rectangles,
 circles, rings, and dashed lines, glyph bits against the font table, blit
 clipping at all four edges, scaler geometry, and the PPM writer.
 
+The typed, pure-Python binding is maintained in [`python/`](python). It uses
+the same shared library without bundling a second native implementation:
+
+```sh
+make python-check
+make python-wheel
+```
+
+The wheel is written below `python/dist/`.
+
 ## Quick start
 
 ```c

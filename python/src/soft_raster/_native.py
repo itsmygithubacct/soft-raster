@@ -62,6 +62,7 @@ def _auto_candidates() -> list[str]:
     candidates: list[str] = []
     for name in names:
         candidates.append(str(package / "_libs" / name))
+        candidates.append(str(project.parent / "build" / name))
         candidates.append(str(project.parent / "soft-raster/build" / name))
         candidates.append(str(project.parent / "kilix/third_party/soft-raster/build" / name))
     found = ctypes.util.find_library("soft-raster")

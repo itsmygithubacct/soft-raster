@@ -1,7 +1,7 @@
-# soft-raster-py
+# soft-raster Python bindings
 
 `soft-raster-py` is an ownership-safe Python binding for
-[`soft-raster`](https://github.com/itsmygithubacct/soft-raster), the small C11
+[`soft-raster`](..), the small C11
 software rasterizer shared by the terminal-lander family of games. It exposes
 the complete soft-raster 0.3 API without a Python extension module or runtime
 Python dependencies.
@@ -16,16 +16,15 @@ even if their `Canvas` is explicitly closed.
 - Python 3.10 or newer
 - `libsoft-raster` 0.3.x built as a shared library
 
-For sibling source checkouts:
+From a source checkout:
 
 ```bash
 git clone https://github.com/itsmygithubacct/soft-raster.git
-git clone https://github.com/itsmygithubacct/soft-raster-py.git
-cd soft-raster-py
+cd soft-raster/python
 make check
 ```
 
-The loader finds `../soft-raster/build/libsoft-raster.so` automatically. An
+The loader finds `../build/libsoft-raster.so` automatically. An
 installed or unusual build can be selected explicitly:
 
 ```bash
@@ -34,9 +33,10 @@ python3 your_program.py
 ```
 
 Discovery checks, in order: `SOFT_RASTER_LIBRARY`, a package-local `_libs`
-directory, conventional sibling checkouts, the platform library registry, and
-the dynamic loader's default paths. A configured environment override is
-authoritative, so a typo fails clearly rather than loading a surprising ABI.
+directory, this repository's native build, conventional sibling checkouts, the
+platform library registry, and the dynamic loader's default paths. A configured
+environment override is authoritative, so a typo fails clearly rather than
+loading a surprising ABI.
 
 Install the pure Python package with:
 
@@ -162,5 +162,5 @@ validated by its complete required symbol set. A missing symbol raises
 
 ## License
 
-MIT. The external `soft-raster` library is also MIT licensed and carries its
-own embedded-font provenance notice.
+MIT. The native `soft-raster` library in the parent directory is also MIT
+licensed and carries its own embedded-font provenance notice.

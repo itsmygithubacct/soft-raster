@@ -21,7 +21,7 @@ SHARED_LIB := $(BUILD_DIR)/lib$(PROJECT).so
 TEST_BIN := $(BUILD_DIR)/test-raster
 EXAMPLE_BIN := $(BUILD_DIR)/demo
 
-.PHONY: all clean install sanitize test
+.PHONY: all clean install python-check python-wheel sanitize test
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 
@@ -52,6 +52,12 @@ sanitize: | $(BUILD_DIR)
 		src/soft_raster.c tests/test_raster.c \
 		-fsanitize=address,undefined $(LDLIBS) -o $(BUILD_DIR)/test-raster-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(BUILD_DIR)/test-raster-sanitize
+
+python-check:
+	$(MAKE) -C python check SOFT_RASTER_DIR=..
+
+python-wheel:
+	$(MAKE) -C python wheel SOFT_RASTER_DIR=..
 
 install: all
 	$(INSTALL) -d $(DESTDIR)$(PREFIX)/include $(DESTDIR)$(PREFIX)/lib

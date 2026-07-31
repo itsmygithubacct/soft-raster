@@ -1,5 +1,5 @@
 PYTHON ?= python3
-SOFT_RASTER_DIR ?= ../soft-raster
+SOFT_RASTER_DIR ?= ..
 SOFT_RASTER_LIBRARY := $(abspath $(SOFT_RASTER_DIR)/build/libsoft-raster.so)
 PYTHON_SOURCES := $(wildcard src/soft_raster/*.py)
 TEST_SOURCES := $(wildcard tests/*.py)

@@ -1,4 +1,4 @@
-name: CI
+name: Python
 
 on:
   push:
@@ -16,22 +16,18 @@ jobs:
         python-version: ["3.10", "3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v6
-      - uses: actions/checkout@v6
-        with:
-          repository: itsmygithubacct/soft-raster
-          path: soft-raster
       - uses: actions/setup-python@v6
         with:
           python-version: ${{ matrix.python-version }}
       - name: Install packaging tools
         run: python -m pip install --upgrade build pip setuptools wheel
-      - name: Build and test
-        run: make check SOFT_RASTER_DIR=soft-raster
+      - name: Build and test native and Python libraries
+        run: make python-check
       - name: Build distributions
-        run: python -m build
+        run: make python-wheel
       - name: Smoke-test installed wheel
         run: |
-          python -m pip install --force-reinstall --no-deps dist/*.whl
+          python -m pip install --force-reinstall --no-deps python/dist/*.whl
           cd /tmp
-          SOFT_RASTER_LIBRARY="$GITHUB_WORKSPACE/soft-raster/build/libsoft-raster.so" \
+          SOFT_RASTER_LIBRARY="$GITHUB_WORKSPACE/build/libsoft-raster.so" \
             python -c 'import soft_raster as sr; assert sr.Canvas(2, 2).clear(0x123456).rgb_bytes() == bytes.fromhex("123456" * 4)'
