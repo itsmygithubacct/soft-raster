@@ -720,6 +720,78 @@ test_letterbox_scaler_geometry(void)
 }
 
 static bool
+test_selectable_faces(void)
+{
+    sr_canvas c;
+    int fixed_ink = 0, compact_ink = 0, legacy_ink = 0, i;
+    unsigned ch;
+
+    /* Both faces advance 8px, so a string occupies the same width in
+     * either; only the glyphs and the cell height differ. */
+    CHECK(sr_font_advance(SR_FONT_FIXED_8X16) == 8);
+    CHECK(sr_font_advance(SR_FONT_COMPACT_7X14) == 8);
+    CHECK(sr_font_height(SR_FONT_FIXED_8X16) == 16);
+    CHECK(sr_font_height(SR_FONT_COMPACT_7X14) == 14);
+    CHECK(sr_text_width_in(SR_FONT_COMPACT_7X14, "Desk", 1) == 32);
+    CHECK(sr_text_width_in(SR_FONT_COMPACT_7X14, "Desk", 3) == 96);
+    CHECK(sr_text_width_in(SR_FONT_COMPACT_7X14, "", 1) == 0);
+
+    /* An unknown face measures and draws nothing rather than quietly
+     * falling back to a face the caller did not ask for. */
+    CHECK(sr_font_advance(SR_FONT_COUNT) == 0);
+    CHECK(sr_font_height(SR_FONT_COUNT) == 0);
+    CHECK(sr_font_glyph_in(SR_FONT_COUNT, 'A') == NULL);
+    CHECK(sr_text_width_in(SR_FONT_COUNT, "Desk", 1) == 0);
+
+    /* Every printable character carries ink, and the space carries none:
+     * a blank glyph would satisfy a lookup and still leave a hole. */
+    for (ch = 33u; ch <= 126u; ++ch) {
+        const uint8_t *glyph =
+            sr_font_glyph_in(SR_FONT_COMPACT_7X14, (unsigned char)ch);
+        int ink = 0, row;
+        CHECK(glyph != NULL);
+        for (row = 0; row < 14; ++row) ink |= glyph[row];
+        CHECK(ink != 0);
+    }
+    {
+        const uint8_t *glyph = sr_font_glyph_in(SR_FONT_COMPACT_7X14, ' ');
+        int row;
+        for (row = 0; row < 14; ++row) CHECK(glyph[row] == 0);
+    }
+    /* Seven wide inside an eight cell: the rightmost column stays clear,
+     * which is what keeps adjacent characters from touching. */
+    for (ch = 32u; ch <= 126u; ++ch) {
+        const uint8_t *glyph =
+            sr_font_glyph_in(SR_FONT_COMPACT_7X14, (unsigned char)ch);
+        int row;
+        for (row = 0; row < 14; ++row) CHECK((glyph[row] & 0x01u) == 0u);
+    }
+
+    /* Selecting a face changes what is drawn. */
+    CHECK(sr_canvas_init(&c, 64, 32));
+    sr_clear(&c, 0x000000u);
+    sr_text_in(SR_FONT_FIXED_8X16, &c, 0.0f, 0.0f, "A", 0xffffffu, 1.0f, 1);
+    for (i = 0; i < 64 * 32; ++i) if (c.px[i] & 0xffffffu) ++fixed_ink;
+    sr_clear(&c, 0x000000u);
+    sr_text_in(SR_FONT_COMPACT_7X14, &c, 0.0f, 0.0f, "A", 0xffffffu, 1.0f, 1);
+    for (i = 0; i < 64 * 32; ++i) if (c.px[i] & 0xffffffu) ++compact_ink;
+    CHECK(fixed_ink > 0);
+    CHECK(compact_ink > 0);
+    CHECK(fixed_ink != compact_ink);
+
+    /* The original entry points keep drawing the default face. */
+    sr_clear(&c, 0x000000u);
+    sr_text(&c, 0.0f, 0.0f, "A", 0xffffffu, 1.0f, 1);
+    for (i = 0; i < 64 * 32; ++i) if (c.px[i] & 0xffffffu) ++legacy_ink;
+    CHECK(legacy_ink == fixed_ink);
+    CHECK(sr_text_width("Desk", 1) ==
+          sr_text_width_in(SR_FONT_FIXED_8X16, "Desk", 1));
+
+    sr_canvas_free(&c);
+    return true;
+}
+
+static bool
 test_ppm_round_trip(void)
 {
     const char *path = "build/test-roundtrip.ppm";
@@ -801,7 +873,8 @@ main(void)
         {"transformed blit composition and clipping",
          test_blit_transformed_composition_and_clipping},
         {"letterbox scaler geometry", test_letterbox_scaler_geometry},
-        {"PPM load/write round-trip", test_ppm_round_trip}
+        {"PPM load/write round-trip", test_ppm_round_trip},
+        {"selectable faces", test_selectable_faces}
     };
     size_t passed = 0u;
     size_t index;

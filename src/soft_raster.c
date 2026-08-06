@@ -9,6 +9,7 @@
  */
 #include "soft_raster.h"
 #include "font8x16.h"
+#include "font7x14.h"
 
 #include <ctype.h>
 #include <errno.h>
@@ -421,9 +422,9 @@ const uint8_t *sr_font_glyph(unsigned char ch)
 }
 
 static void draw_glyph(sr_canvas *c, int x, int y, const unsigned char *glyph,
-                       uint32_t rgb, float alpha, int scale)
+                       uint32_t rgb, float alpha, int scale, int height)
 {
-    for (int gy = 0; gy < SR_FONT_H; gy++) {
+    for (int gy = 0; gy < height; gy++) {
         unsigned row = glyph[gy];
         for (int gx = 0; gx < SR_FONT_W; gx++) {
             if (!((row >> (7 - gx)) & 1u)) continue;
@@ -443,7 +444,8 @@ void sr_text(sr_canvas *c, float x, float y, const char *s,
     int ix = (int)x, iy = (int)y;
     for (; *s; s++) {
         unsigned char ch = (unsigned char)*s;
-        draw_glyph(c, ix, iy, sr_font_glyph(ch), rgb, alpha, scale);
+        draw_glyph(c, ix, iy, sr_font_glyph(ch), rgb, alpha, scale,
+                   SR_FONT_H);
         ix += SR_FONT_W * scale;
     }
 }
@@ -472,6 +474,74 @@ void sr_text_shadow(sr_canvas *c, float x, float y, const char *s,
     sr_text(c, x + (float)scale, y + (float)scale, s,
             0x000000u, alpha * 0.75f, scale);
     sr_text(c, x, y, s, rgb, alpha, scale);
+}
+
+/* ---- Selectable faces ---------------------------------------------- */
+
+typedef struct sr_font_desc {
+    const unsigned char (*glyphs)[14];
+    const unsigned char (*glyphs16)[16];
+    int advance;
+    int height;
+} sr_font_desc;
+
+static const sr_font_desc *font_desc(sr_font_id font)
+{
+    static const sr_font_desc fixed = {NULL, font8x16, SR_FONT_W, SR_FONT_H};
+    static const sr_font_desc compact = {font7x14, NULL, 8, 14};
+    if (font == SR_FONT_FIXED_8X16) return &fixed;
+    if (font == SR_FONT_COMPACT_7X14) return &compact;
+    return NULL;
+}
+
+int sr_font_advance(sr_font_id font)
+{
+    const sr_font_desc *d = font_desc(font);
+    return d ? d->advance : 0;
+}
+
+int sr_font_height(sr_font_id font)
+{
+    const sr_font_desc *d = font_desc(font);
+    return d ? d->height : 0;
+}
+
+const uint8_t *sr_font_glyph_in(sr_font_id font, unsigned char ch)
+{
+    const sr_font_desc *d = font_desc(font);
+    if (d == NULL) return NULL;
+    if (ch < 32u || ch > 126u) ch = (unsigned char)'?';
+    return d->glyphs16 ? d->glyphs16[ch - 32u] : d->glyphs[ch - 32u];
+}
+
+int sr_text_width_in(sr_font_id font, const char *s, int scale)
+{
+    const sr_font_desc *d = font_desc(font);
+    if (d == NULL || s == NULL) return 0;
+    if (scale < 1) scale = 1;
+    return (int)strlen(s) * d->advance * scale;
+}
+
+void sr_text_in(sr_font_id font, sr_canvas *c, float x, float y,
+                const char *s, uint32_t rgb, float alpha, int scale)
+{
+    const sr_font_desc *d = font_desc(font);
+    if (d == NULL || !canvas_ok(c) || s == NULL) return;
+    if (scale < 1) scale = 1;
+    int ix = (int)x, iy = (int)y;
+    for (; *s; s++) {
+        draw_glyph(c, ix, iy, sr_font_glyph_in(font, (unsigned char)*s),
+                   rgb, alpha, scale, d->height);
+        ix += d->advance * scale;
+    }
+}
+
+void sr_text_center_in(sr_font_id font, sr_canvas *c, float cx, float y,
+                       const char *s, uint32_t rgb, float alpha, int scale)
+{
+    if (s == NULL) return;
+    sr_text_in(font, c, cx - (float)sr_text_width_in(font, s, scale) / 2.0f,
+               y, s, rgb, alpha, scale);
 }
 
 /* ----------------------------------------------------------------- blits */

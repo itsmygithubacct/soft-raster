@@ -146,6 +146,35 @@ void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
  */
 int  sr_text_width(const char *s, int scale);
 const uint8_t *sr_font_glyph(unsigned char ch);
+
+/*
+ * Selectable faces.  SR_FONT_FIXED_8X16 is what the calls above have always
+ * drawn and stays the default, so existing callers are unaffected.
+ * SR_FONT_COMPACT_7X14 is a narrower authored face at the same 8px advance:
+ * the same string occupies the same width in either, only the glyphs and the
+ * cell height differ.  A face is chosen per call rather than set globally,
+ * because a global would make what a string looks like depend on what drew
+ * before it.
+ */
+typedef enum sr_font_id {
+    SR_FONT_FIXED_8X16 = 0,
+    SR_FONT_COMPACT_7X14,
+    SR_FONT_COUNT
+} sr_font_id;
+
+/* Advance per character and cell height, in unscaled pixels.  Both return 0
+ * for an unknown face, which is also what its text draws. */
+int sr_font_advance(sr_font_id font);
+int sr_font_height(sr_font_id font);
+/* The scanline rows of one glyph, sr_font_height() of them, MSB leftmost.
+ * NULL for an unknown face; unmapped characters render as '?'. */
+const uint8_t *sr_font_glyph_in(sr_font_id font, unsigned char ch);
+
+int  sr_text_width_in(sr_font_id font, const char *s, int scale);
+void sr_text_in(sr_font_id font, sr_canvas *c, float x, float y,
+                const char *s, uint32_t rgb, float alpha, int scale);
+void sr_text_center_in(sr_font_id font, sr_canvas *c, float cx, float y,
+                       const char *s, uint32_t rgb, float alpha, int scale);
 void sr_text(sr_canvas *c, float x, float y, const char *s,
              uint32_t rgb, float alpha, int scale);
 void sr_text_center(sr_canvas *c, float cx, float y, const char *s,
