@@ -61,6 +61,34 @@ class PrimitiveTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             canvas.fill_convex(((0, 0), (1, 1)), 0)
 
+    def test_fill_polygon_handles_concave_outlines(self) -> None:
+        # An L: a horizontal arm along the top, a vertical arm down the left.
+        l_shape = ((2, 2), (12, 2), (12, 6), (6, 6), (6, 12), (2, 12))
+
+        canvas = sr.Canvas(16, 16).clear(0)
+        canvas.fill_polygon(l_shape, 0xFFFFFF)
+        self.assertEqual(red(canvas[4, 4]), 255)   # corner where arms meet
+        self.assertEqual(red(canvas[9, 4]), 255)   # horizontal arm
+        self.assertEqual(red(canvas[4, 9]), 255)   # vertical arm
+        self.assertEqual(red(canvas[9, 9]), 0)     # notch stays empty
+
+        # fill_convex loses both arms on the same outline, which is why
+        # fill_polygon exists.
+        convex = sr.Canvas(16, 16).clear(0)
+        convex.fill_convex(l_shape, 0xFFFFFF)
+        self.assertEqual(red(convex[4, 4]), 255)
+        self.assertEqual(red(convex[9, 4]), 0)
+        self.assertEqual(red(convex[4, 9]), 0)
+
+        # winding direction does not matter
+        reversed_canvas = sr.Canvas(16, 16).clear(0)
+        reversed_canvas.fill_polygon(tuple(reversed(l_shape)), 0xFFFFFF)
+        self.assertEqual(red(reversed_canvas[9, 4]), 255)
+        self.assertEqual(red(reversed_canvas[9, 9]), 0)
+
+        with self.assertRaises(ValueError):
+            canvas.fill_polygon(((0, 0), (1, 1)), 0)
+
     def test_text_helpers_and_rendering(self) -> None:
         self.assertEqual(sr.text_width("ABC", 2), 48)
         self.assertEqual(sr.text_width("ABC", 0), 24)

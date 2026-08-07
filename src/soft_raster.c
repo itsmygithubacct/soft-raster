@@ -406,6 +406,76 @@ void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
     }
 }
 
+/* Even-odd scanline fill.  Unlike sr_fill_convex() above, which asks
+ * whether a pixel lies on one side of every edge, this counts how many
+ * edges the scanline crosses to the pixel's left -- the only one of the
+ * two that is an inside test for a concave outline.
+ *
+ * Crossings per scanline are bounded by the vertex count, so a stack
+ * buffer covers every polygon anyone hand-authors and the heap is only
+ * touched by generated outlines. */
+#define POLY_STACK_CROSSINGS 64u
+
+void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
+                     size_t count, uint32_t rgb, float alpha)
+{
+    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u) return;
+
+    float min_y = ys[0], max_y = ys[0];
+    for (size_t i = 1u; i < count; i++) {
+        min_y = fminf(min_y, ys[i]);
+        max_y = fmaxf(max_y, ys[i]);
+    }
+    int y0 = clip_lo(min_y), y1 = clip_hi(max_y, c->h);
+    if (y0 >= y1) return;
+
+    float stack_crossings[POLY_STACK_CROSSINGS];
+    float *crossings = stack_crossings;
+    if (count > POLY_STACK_CROSSINGS) {
+        crossings = (float *)malloc(count * sizeof(float));
+        if (crossings == NULL) return;
+    }
+
+    for (int y = y0; y < y1; y++) {
+        float py = (float)y + 0.5f;
+        size_t found = 0u;
+        for (size_t i = 0u; i < count; i++) {
+            size_t next = i + 1u == count ? 0u : i + 1u;
+            float yi = ys[i], yj = ys[next];
+            /* Half-open in y: an edge spans [min, max), so a vertex shared
+             * by two edges is counted once and a horizontal edge not at
+             * all.  Without this a scanline through a vertex fills the
+             * wrong side of it. */
+            if ((yi <= py) == (yj <= py)) continue;
+            crossings[found++] =
+                xs[i] + (py - yi) / (yj - yi) * (xs[next] - xs[i]);
+        }
+        if (found < 2u) continue;
+
+        for (size_t a = 1u; a < found; a++) {   /* insertion sort: found is small */
+            float v = crossings[a];
+            size_t b = a;
+            while (b > 0u && crossings[b - 1u] > v) {
+                crossings[b] = crossings[b - 1u];
+                b--;
+            }
+            crossings[b] = v;
+        }
+
+        for (size_t k = 0u; k + 1u < found; k += 2u) {
+            /* Pixel x is inside when its center x + 0.5 falls in the span. */
+            int sx = (int)ceilf(crossings[k] - 0.5f);
+            int ex = (int)ceilf(crossings[k + 1u] - 0.5f);
+            if (sx < 0) sx = 0;
+            if (ex > c->w) ex = c->w;
+            for (int x = sx; x < ex; x++)
+                blend_px(c, x, y, rgb, alpha);
+        }
+    }
+
+    if (crossings != stack_crossings) free(crossings);
+}
+
 /* ------------------------------------------------------------------ text */
 
 int sr_text_width(const char *s, int scale)

@@ -220,6 +220,11 @@ class SoftRasterLibrary:
             [canvas, floats, floats, ctypes.c_size_t, color, floating],
             None,
         )
+        self._declare(
+            "sr_fill_polygon",
+            [canvas, floats, floats, ctypes.c_size_t, color, floating],
+            None,
+        )
 
         self._declare("sr_text_width", [ctypes.c_char_p, integer], integer)
         self._declare(

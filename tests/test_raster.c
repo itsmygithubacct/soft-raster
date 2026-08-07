@@ -325,6 +325,205 @@ test_ellipse_and_convex_fill(void)
     return true;
 }
 
+/* The case sr_fill_convex() cannot express.
+ *
+ * Given a concave outline it draws the intersection of the edges'
+ * half-planes -- a smaller shape than asked for.  For this L that is the
+ * 4x4 block where the arms overlap, and both arms disappear.  The test
+ * asserts that difference in both directions, so it fails if the two
+ * functions are ever accidentally made equivalent. */
+static bool
+test_fill_polygon_concave(void)
+{
+    /* (2,2) (12,2) (12,6) (6,6) (6,12) (2,12) -- an L with a horizontal
+     * arm along the top and a vertical arm down the left. */
+    static const float xs[6] = {2.0f, 12.0f, 12.0f, 6.0f, 6.0f, 2.0f};
+    static const float ys[6] = {2.0f, 2.0f, 6.0f, 6.0f, 12.0f, 12.0f};
+    sr_canvas c;
+
+    CHECK(sr_canvas_init(&c, 16, 16));
+    sr_fill_polygon(&c, xs, ys, 6u, 0xffffffu, 1.0f);
+    CHECK(red_at(&c, 4, 4) == 255);    /* corner where the arms meet */
+    CHECK(red_at(&c, 9, 4) == 255);    /* far end of the horizontal arm */
+    CHECK(red_at(&c, 4, 9) == 255);    /* far end of the vertical arm */
+    CHECK(red_at(&c, 9, 9) == 0);      /* the notch stays empty */
+    CHECK(red_at(&c, 11, 11) == 0);
+    CHECK(red_at(&c, 0, 0) == 0);      /* outside the bounding box */
+    CHECK(red_at(&c, 15, 15) == 0);
+    sr_canvas_free(&c);
+
+    /* The same outline through sr_fill_convex keeps only the overlap and
+     * loses both arms, which is why this function exists. */
+    CHECK(sr_canvas_init(&c, 16, 16));
+    sr_fill_convex(&c, xs, ys, 6u, 0xffffffu, 1.0f);
+    CHECK(red_at(&c, 4, 4) == 255);    /* overlap survives */
+    CHECK(red_at(&c, 9, 4) == 0);      /* horizontal arm lost */
+    CHECK(red_at(&c, 4, 9) == 0);      /* vertical arm lost */
+    CHECK(red_at(&c, 9, 9) == 0);      /* it under-fills, never over-fills */
+    sr_canvas_free(&c);
+    return true;
+}
+
+/* Convex input must land in the same place through either function, or
+ * callers cannot migrate between them.  The offsets keep every edge off
+ * the pixel centers, where the two boundary rules legitimately differ --
+ * that difference is its own test below. */
+static bool
+test_fill_polygon_matches_convex(void)
+{
+    static const float xs[4] = {3.2f, 12.7f, 11.8f, 4.3f};
+    static const float ys[4] = {3.4f, 4.2f, 12.6f, 11.9f};
+    sr_canvas poly, conv;
+    int x, y, differing = 0;
+
+    CHECK(sr_canvas_init(&poly, 16, 16));
+    CHECK(sr_canvas_init(&conv, 16, 16));
+    sr_fill_polygon(&poly, xs, ys, 4u, 0xffffffu, 1.0f);
+    sr_fill_convex(&conv, xs, ys, 4u, 0xffffffu, 1.0f);
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < 16; x++)
+            if (px_at(&poly, x, y) != px_at(&conv, x, y)) differing++;
+    CHECK(differing == 0);
+    sr_canvas_free(&poly);
+    sr_canvas_free(&conv);
+    return true;
+}
+
+/* Half-open spans: a shared edge belongs to exactly one of two abutting
+ * polygons.  Filled at half alpha, a seam would show as a doubled blend
+ * along the join and a gap would show as background. */
+static bool
+test_fill_polygon_tiles_without_seams(void)
+{
+    static const float ax[4] = {0.0f, 8.0f, 8.0f, 0.0f};
+    static const float ay[4] = {0.0f, 0.0f, 12.0f, 12.0f};
+    static const float bx[4] = {8.0f, 16.0f, 16.0f, 8.0f};
+    static const float by[4] = {0.0f, 0.0f, 12.0f, 12.0f};
+    sr_canvas c;
+    int x;
+
+    CHECK(sr_canvas_init(&c, 16, 12));
+    sr_clear(&c, 0x000000u);
+    sr_fill_polygon(&c, ax, ay, 4u, 0xffffffu, 0.5f);
+    sr_fill_polygon(&c, bx, by, 4u, 0xffffffu, 0.5f);
+    /* every pixel across the join carries exactly one blend: a seam would
+     * read higher from a doubled blend, a gap would read 0 */
+    for (x = 0; x < 16; x++)
+        CHECK(red_at(&c, x, 6) == 127);
+    sr_canvas_free(&c);
+    return true;
+}
+
+static bool
+test_fill_polygon_winding_and_selfintersection(void)
+{
+    static const float xs[6] = {2.0f, 12.0f, 12.0f, 6.0f, 6.0f, 2.0f};
+    static const float ys[6] = {2.0f, 2.0f, 6.0f, 6.0f, 12.0f, 12.0f};
+    float rx[6], ry[6];
+    sr_canvas a, b;
+    int x, y, differing = 0;
+    size_t i;
+
+    /* Reversed winding must render identically: hand-authored coordinates
+     * should not have to be ordered. */
+    for (i = 0u; i < 6u; i++) {
+        rx[i] = xs[5u - i];
+        ry[i] = ys[5u - i];
+    }
+    CHECK(sr_canvas_init(&a, 16, 16));
+    CHECK(sr_canvas_init(&b, 16, 16));
+    sr_fill_polygon(&a, xs, ys, 6u, 0xffffffu, 1.0f);
+    sr_fill_polygon(&b, rx, ry, 6u, 0xffffffu, 1.0f);
+    for (y = 0; y < 16; y++)
+        for (x = 0; x < 16; x++)
+            if (px_at(&a, x, y) != px_at(&b, x, y)) differing++;
+    CHECK(differing == 0);
+    sr_canvas_free(&a);
+    sr_canvas_free(&b);
+
+    /* Even-odd: a bowtie's two lobes fill and the crossing point does not
+     * become a filled bridge between them. */
+    {
+        static const float bx[4] = {2.0f, 14.0f, 2.0f, 14.0f};
+        static const float by[4] = {2.0f, 14.0f, 14.0f, 2.0f};
+        sr_canvas c;
+
+        CHECK(sr_canvas_init(&c, 16, 16));
+        sr_fill_polygon(&c, bx, by, 4u, 0xffffffu, 1.0f);
+        CHECK(red_at(&c, 8, 4) == 255);    /* upper lobe */
+        CHECK(red_at(&c, 8, 11) == 255);   /* lower lobe */
+        CHECK(red_at(&c, 3, 8) == 0);      /* left gap between lobes */
+        CHECK(red_at(&c, 13, 8) == 0);     /* right gap */
+        sr_canvas_free(&c);
+    }
+    return true;
+}
+
+static bool
+test_fill_polygon_clipping_and_rejects(void)
+{
+    static const float xs[4] = {-6.0f, 10.0f, 10.0f, -6.0f};
+    static const float ys[4] = {-6.0f, -6.0f, 10.0f, 10.0f};
+    static const float tiny[2] = {1.0f, 2.0f};
+    sr_canvas c;
+
+    /* A polygon starting off-canvas must still fill what is on it. */
+    CHECK(sr_canvas_init(&c, 16, 16));
+    sr_fill_polygon(&c, xs, ys, 4u, 0xffffffu, 1.0f);
+    CHECK(red_at(&c, 0, 0) == 255);
+    CHECK(red_at(&c, 9, 9) == 255);
+    CHECK(red_at(&c, 12, 12) == 0);
+
+    /* and the clip rectangle must still bound it */
+    sr_canvas_set_clip(&c, 4, 4, 3, 3);
+    sr_fill_polygon(&c, xs, ys, 4u, 0xff0000u, 1.0f);
+    CHECK(red_at(&c, 5, 5) == 255);
+    sr_canvas_reset_clip(&c);
+
+    /* degenerate input draws nothing and does not crash */
+    sr_fill_polygon(&c, xs, ys, 2u, 0x00ff00u, 1.0f);
+    sr_fill_polygon(&c, NULL, ys, 4u, 0x00ff00u, 1.0f);
+    sr_fill_polygon(&c, xs, NULL, 4u, 0x00ff00u, 1.0f);
+    sr_fill_polygon(NULL, xs, ys, 4u, 0x00ff00u, 1.0f);
+    sr_fill_polygon(&c, tiny, tiny, 2u, 0x00ff00u, 1.0f);
+    sr_canvas_free(&c);
+
+    /* more vertices than the stack buffer holds, exercising the heap path */
+    {
+        float bigx[96], bigy[96];
+        size_t i;
+
+        for (i = 0u; i < 96u; i++) {
+            float t = (float)i / 96.0f * 6.2831853f;
+            bigx[i] = 32.0f + 20.0f * cosf(t);
+            bigy[i] = 32.0f + 20.0f * sinf(t);
+        }
+        CHECK(sr_canvas_init(&c, 64, 64));
+        sr_fill_polygon(&c, bigx, bigy, 96u, 0xffffffu, 1.0f);
+        CHECK(red_at(&c, 32, 32) == 255);
+        CHECK(red_at(&c, 1, 1) == 0);
+        sr_canvas_free(&c);
+    }
+    return true;
+}
+
+static bool
+test_fill_polygon_alpha(void)
+{
+    static const float xs[4] = {0.0f, 8.0f, 8.0f, 0.0f};
+    static const float ys[4] = {0.0f, 0.0f, 8.0f, 8.0f};
+    sr_canvas c;
+
+    CHECK(sr_canvas_init(&c, 8, 8));
+    sr_clear(&c, 0x000000u);
+    sr_fill_polygon(&c, xs, ys, 4u, 0xffffffu, 0.5f);
+    /* half coverage of white over black: 0 + ((255 - 0) * 128 >> 8) = 127,
+     * matching the blend-math reference above */
+    CHECK(red_at(&c, 4, 4) == 127);
+    sr_canvas_free(&c);
+    return true;
+}
+
 static bool
 test_text_metrics_and_glyph_bits(void)
 {
@@ -864,6 +1063,15 @@ main(void)
         {"line width, dash, and coverage", test_line_width_dash_and_coverage},
         {"fill_triangle", test_fill_triangle},
         {"ellipse and convex fill", test_ellipse_and_convex_fill},
+        {"fill_polygon concave", test_fill_polygon_concave},
+        {"fill_polygon matches convex", test_fill_polygon_matches_convex},
+        {"fill_polygon tiles without seams",
+         test_fill_polygon_tiles_without_seams},
+        {"fill_polygon winding and self-intersection",
+         test_fill_polygon_winding_and_selfintersection},
+        {"fill_polygon clipping and rejects",
+         test_fill_polygon_clipping_and_rejects},
+        {"fill_polygon alpha", test_fill_polygon_alpha},
         {"text metrics and glyph bits", test_text_metrics_and_glyph_bits},
         {"text outline and shadow", test_text_outline_and_shadow},
         {"blit clipping at all edges", test_blit_clipping_all_edges},

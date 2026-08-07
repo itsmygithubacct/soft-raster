@@ -115,7 +115,7 @@ synchronized.
 
 - Pixels: `clear`, `pixel`, `blend`, tuple indexing.
 - Primitives: `fill_rect`, `stroke_rect`, `fill_circle`, `fill_ellipse`,
-  `ring`, `line`, `fill_triangle`, and `fill_convex`.
+  `ring`, `line`, `fill_triangle`, `fill_convex`, and `fill_polygon`.
 - Embedded 8×16 text: `text`, `text_center`, `text_outlined`, `text_shadow`,
   plus module-level `text_width` and `font_glyph`.
 - Sprites: `blit`, `blit_alpha`, `blit_tint`, `blit_scaled`, and

@@ -116,6 +116,9 @@ between pixel centers receive fractional-coverage anti-aliasing.
   pixels (`0, 0` for solid).
 - `sr_fill_triangle` — filled triangle via edge functions, either winding.
 - `sr_fill_convex` — filled convex polygon from parallel coordinate arrays.
+- `sr_fill_polygon` — filled polygon, concave permitted, via even-odd
+  scanlines. Winding-independent, half-open spans so adjacent polygons tile
+  without a seam, and cheaper than `sr_fill_convex` on any polygon of size.
 
 ## Text
 

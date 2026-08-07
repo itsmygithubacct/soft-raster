@@ -701,6 +701,51 @@ class Canvas:
         )
         return self
 
+    def fill_polygon(
+        self,
+        points: Iterable[Sequence[float]],
+        value: ColorLike,
+        alpha: float = 1.0,
+    ) -> "Canvas":
+        """Fill an arbitrary polygon, concave permitted.
+
+        ``fill_convex`` keeps only pixels on the same side of every edge, so a
+        concave outline comes out smaller than asked for -- an L renders as the
+        block where its arms overlap.  This walks scanlines instead and handles
+        any simple polygon.
+
+        Filling is even-odd, so winding direction does not matter and a
+        self-intersecting outline leaves its doubly-enclosed region empty.
+        Spans are half-open, so polygons sharing an edge tile it exactly once.
+        """
+        self._require_open()
+        coordinates: list[Point] = []
+        for index, point in enumerate(points):
+            try:
+                x, y = point
+            except (TypeError, ValueError) as error:
+                raise ValueError(f"point {index} must contain exactly x and y") from error
+            coordinates.append(
+                (
+                    _floating(x, f"points[{index}].x", coordinate=True),
+                    _floating(y, f"points[{index}].y", coordinate=True),
+                )
+            )
+        if len(coordinates) < 3:
+            raise ValueError("a polygon needs at least three points")
+        array_type = ctypes.c_float * len(coordinates)
+        xs = array_type(*(point[0] for point in coordinates))
+        ys = array_type(*(point[1] for point in coordinates))
+        self._library.raw.sr_fill_polygon(
+            ctypes.byref(self._canvas),
+            xs,
+            ys,
+            len(coordinates),
+            color(value),
+            _floating(alpha, "alpha"),
+        )
+        return self
+
     def _draw_text(
         self,
         function_name: str,

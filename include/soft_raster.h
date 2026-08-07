@@ -118,6 +118,9 @@ void sr_blend(sr_canvas *c, int x, int y, uint32_t rgb, float alpha);
  *   computed from the distance to the segment.  dash_on/dash_off give the
  *   dash pattern in pixels along the line; pass 0, 0 for a solid line.
  * - sr_fill_triangle: filled triangle via edge functions (either winding).
+ *
+ * sr_fill_triangle, sr_fill_convex and sr_fill_polygon sample the pixel
+ * center rather than computing coverage, so their edges are hard.
  */
 void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
                   uint32_t rgb, float alpha);
@@ -136,6 +139,41 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
                       float x2, float y2, uint32_t rgb, float alpha);
 void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
                     size_t count, uint32_t rgb, float alpha);
+
+/*
+ * Arbitrary polygon fill, concave permitted.
+ *
+ * sr_fill_convex() keeps pixels lying on the same side of every edge,
+ * which is an inside test only while the polygon is convex.  Given a
+ * concave outline it draws the intersection of the edges' half-planes,
+ * which is a *smaller* shape than asked for, not a larger one: an L
+ * renders as the block where its two arms overlap and both arms vanish.
+ *
+ * This walks scanlines and fills between pairs of edge crossings instead,
+ * so any simple polygon works -- a zone routed around an obstacle, a
+ * boundary following a fence line.
+ *
+ * Filling is even-odd, which has two consequences worth knowing:
+ *
+ * - Winding direction does not matter, matching sr_fill_triangle() and
+ *   sr_fill_convex().  Hand-authored coordinates need not be ordered.
+ * - A self-intersecting outline leaves the doubly-enclosed region empty
+ *   rather than filled.  A five-point star drawn as one crossing loop is
+ *   hollow in the middle.
+ *
+ * Spans are half-open: a pixel whose center falls exactly on a left or
+ * top edge is filled, one on a right or bottom edge is not.  Two polygons
+ * sharing an edge therefore tile it exactly once, with no seam and no
+ * doubled blend where alpha is below 1.  sr_fill_convex() instead treats
+ * every boundary as closed, so the two can disagree by a pixel wherever a
+ * pixel center lands exactly on an edge; they agree everywhere else.
+ *
+ * Cost is proportional to rows times edges rather than to area times
+ * edges, so this is also the faster of the two on any polygon large
+ * enough to matter.
+ */
+void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
+                     size_t count, uint32_t rgb, float alpha);
 
 /*
  * Text over the embedded 8x16 font (ASCII 32..126; anything else renders

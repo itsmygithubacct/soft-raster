@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Add `Canvas.fill_polygon()`, binding `sr_fill_polygon()` for concave
+  outlines.
+
 ## 0.1.0 - 2026-07-22
 
 - Add a complete `ctypes` binding for the soft-raster 0.3 API.
