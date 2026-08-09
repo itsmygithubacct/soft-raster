@@ -97,10 +97,29 @@ class PrimitiveTests(unittest.TestCase):
         self.assertEqual(len(glyph), sr.FONT_HEIGHT)
         self.assertTrue(any(glyph))
         self.assertEqual(sr.font_glyph("é"), sr.font_glyph("?"))
+        self.assertEqual(sr.font_advance(sr.Font.FIXED_8X16), 8)
+        self.assertEqual(sr.font_height(sr.Font.FIXED_8X16), 16)
+        self.assertEqual(sr.font_advance(sr.Font.COMPACT_7X14), 8)
+        self.assertEqual(sr.font_height(sr.Font.COMPACT_7X14), 14)
+        self.assertEqual(
+            sr.text_width("ABC", 2, font=sr.Font.COMPACT_7X14), 48
+        )
+        compact_glyph = sr.font_glyph("A", font=sr.Font.COMPACT_7X14)
+        self.assertEqual(len(compact_glyph), 14)
+        self.assertTrue(any(compact_glyph))
+        with self.assertRaises(ValueError):
+            sr.font_height(99)
 
         canvas = sr.Canvas(160, 72).clear(0x101018)
         canvas.text(2, 2, "plain", 0xFFFFFF)
         canvas.text_center(80, 20, "center", 0x38BDF8)
+        canvas.text(
+            90,
+            2,
+            "compact",
+            0xA78BFA,
+            font=sr.Font.COMPACT_7X14,
+        )
         canvas.text_outlined(2, 38, "outline", 0xFFD166)
         canvas.text_shadow(78, 38, "shadow", 0xF8FAFC)
         self.assertGreater(sum(pixel != 0xFF101018 for pixel in canvas.pixels), 100)

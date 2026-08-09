@@ -3,18 +3,18 @@
 `soft-raster-py` is an ownership-safe Python binding for
 [`soft-raster`](..), the small C11
 software rasterizer shared by the terminal-lander family of games. It exposes
-the complete soft-raster 0.3 API without a Python extension module or runtime
-Python dependencies.
+the complete soft-raster 0.3 API and feature-detects additive 0.4 APIs without
+a Python extension module or runtime Python dependencies.
 
 Python owns each canvas buffer and gives its address to C with
-`sr_canvas_wrap()`. Drawing remains native and allocation-free, while Python
+`sr_canvas_wrap()`. Drawing remains native, while Python
 gets direct mutable pixel and byte views. Those exported views remain valid
 even if their `Canvas` is explicitly closed.
 
 ## Requirements
 
 - Python 3.10 or newer
-- `libsoft-raster` 0.3.x built as a shared library
+- A compatible `libsoft-raster` 0.3 or later built as a shared library
 
 From a source checkout:
 
@@ -46,7 +46,8 @@ python3 -m pip install .
 
 The wheel intentionally does not duplicate the native library. `soft-raster`
 remains the source of truth and can be upgraded independently within the
-supported 0.3 ABI line.
+supported API line. A 0.4 library enables direct RGB packing and selectable
+fonts; the binding retains its fixed-font and RGBA conversion paths for 0.3.
 
 ## Quick start
 
@@ -80,7 +81,9 @@ assert frame[0, 0] == 0xFF112233
 
 Pixels use native `uint32_t` words whose values are `0xAARRGGBB`. Use
 `rgba_bytes()` or `rgb_bytes()` when a consumer needs portable channel order.
-`rgb_bytes()` is directly suitable for `kitty-frame-presenter`:
+Both formats can also be written into caller-owned buffers with
+`pack_rgba_into()` and `pack_rgb_into()`. RGB conversion goes directly through
+the native `sr_pack_rgb()` path and is suitable for `kitty-frame-presenter`:
 
 ```python
 presenter.present(
@@ -116,8 +119,10 @@ synchronized.
 - Pixels: `clear`, `pixel`, `blend`, tuple indexing.
 - Primitives: `fill_rect`, `stroke_rect`, `fill_circle`, `fill_ellipse`,
   `ring`, `line`, `fill_triangle`, `fill_convex`, and `fill_polygon`.
-- Embedded 8×16 text: `text`, `text_center`, `text_outlined`, `text_shadow`,
-  plus module-level `text_width` and `font_glyph`.
+- Embedded text: `text` and `text_center` accept `Font.FIXED_8X16` or
+  `Font.COMPACT_7X14`; module-level `text_width`, `font_advance`,
+  `font_height`, and `font_glyph` use the same selection. `text_outlined` and
+  `text_shadow` retain the fixed face.
 - Sprites: `blit`, `blit_alpha`, `blit_tint`, `blit_scaled`, and
   `blit_transformed` with `Transform` flags.
 - Whole-frame letterboxing: `destination.scale_canvas(source)`.
@@ -141,6 +146,7 @@ frame.reset_clip()
 ```bash
 make demo              # writes demo.ppm
 make wheel             # writes a pure-Python wheel to dist/
+make -C .. python-benchmark
 ```
 
 The demo uses gradients, anti-aliased primitives, embedded text, alpha sprite
@@ -153,10 +159,10 @@ The Python package and C ABI are versioned independently:
 
 ```python
 soft_raster.__version__       # binding version, currently 0.1.0
-soft_raster.SOFT_RASTER_ABI   # required native ABI line, currently (0, 3)
+soft_raster.SOFT_RASTER_ABI   # minimum native API line, currently (0, 3)
 ```
 
-The 0.3 C library predates a runtime version-query symbol, so compatibility is
+The C library predates a runtime version-query symbol, so compatibility is
 validated by its complete required symbol set. A missing symbol raises
 `IncompatibleLibraryError` at load time.
 

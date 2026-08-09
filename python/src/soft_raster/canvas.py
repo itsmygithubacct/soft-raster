@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import ctypes
-from enum import IntFlag
+from enum import IntEnum, IntFlag
 import errno
 import math
 import operator
@@ -12,7 +12,13 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Iterator, Sequence
 
-from ._native import SoftRasterError, SoftRasterLibrary, _Canvas, default_library
+from ._native import (
+    IncompatibleLibraryError,
+    SoftRasterError,
+    SoftRasterLibrary,
+    _Canvas,
+    default_library,
+)
 
 
 INT_MIN = -(2**31)
@@ -40,6 +46,13 @@ class Transform(IntFlag):
     FLIP_HORIZONTAL = 1 << 0
     FLIP_VERTICAL = 1 << 1
     FLIP_DIAGONAL = 1 << 2
+
+
+class Font(IntEnum):
+    """Embedded native font faces."""
+
+    FIXED_8X16 = 0
+    COMPACT_7X14 = 1
 
 
 def _integer(value: Any, name: str, minimum: int = INT_MIN, maximum: int = INT_MAX) -> int:
@@ -107,6 +120,21 @@ def _library(value: SoftRasterLibrary | None) -> SoftRasterLibrary:
     return value
 
 
+def _font(value: Font | int) -> Font:
+    try:
+        return Font(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("font must be Font.FIXED_8X16 or Font.COMPACT_7X14") from error
+
+
+def _require_selectable_fonts(native: SoftRasterLibrary) -> None:
+    if not native.supports_selectable_fonts:
+        raise IncompatibleLibraryError(
+            f"{native.path} does not export the selectable-font API; "
+            "soft-raster 0.4 or a compatible later API is required"
+        )
+
+
 def rgb(
     red: int,
     green: int,
@@ -161,6 +189,8 @@ def scale_rgb(
 
 def _text_bytes(value: str | bytes) -> bytes:
     if isinstance(value, bytes):
+        if all(32 <= byte <= 126 for byte in value):
+            return value
         return bytes(byte if 32 <= byte <= 126 else ord("?") for byte in value)
     if not isinstance(value, str):
         raise TypeError("text must be str or bytes")
@@ -173,24 +203,62 @@ def text_width(
     text: str | bytes,
     scale: int = 1,
     *,
+    font: Font | int = Font.FIXED_8X16,
     library: SoftRasterLibrary | None = None,
 ) -> int:
-    """Return the embedded-font advance width for a string."""
+    """Return the selected embedded font's advance width for a string."""
 
     native = _library(library)
+    selected = _font(font)
+    encoded = _text_bytes(text)
+    checked_scale = _integer(scale, "scale")
+    if selected is Font.FIXED_8X16:
+        return int(native.raw.sr_text_width(encoded, checked_scale))
+    _require_selectable_fonts(native)
     return int(
-        native.raw.sr_text_width(
-            _text_bytes(text), _integer(scale, "scale")
+        native.raw.sr_text_width_in(
+            int(selected), encoded, checked_scale
         )
     )
+
+
+def font_advance(
+    font: Font | int = Font.FIXED_8X16,
+    *,
+    library: SoftRasterLibrary | None = None,
+) -> int:
+    """Return the selected font's unscaled horizontal advance."""
+
+    native = _library(library)
+    selected = _font(font)
+    if selected is Font.FIXED_8X16 and not native.supports_selectable_fonts:
+        return FONT_WIDTH
+    _require_selectable_fonts(native)
+    return int(native.raw.sr_font_advance(int(selected)))
+
+
+def font_height(
+    font: Font | int = Font.FIXED_8X16,
+    *,
+    library: SoftRasterLibrary | None = None,
+) -> int:
+    """Return the selected font's unscaled cell height."""
+
+    native = _library(library)
+    selected = _font(font)
+    if selected is Font.FIXED_8X16 and not native.supports_selectable_fonts:
+        return FONT_HEIGHT
+    _require_selectable_fonts(native)
+    return int(native.raw.sr_font_height(int(selected)))
 
 
 def font_glyph(
     character: str | bytes | int,
     *,
+    font: Font | int = Font.FIXED_8X16,
     library: SoftRasterLibrary | None = None,
 ) -> bytes:
-    """Return the embedded 8×16 bitmap rows for one character."""
+    """Return the selected embedded face's bitmap rows for one character."""
 
     if isinstance(character, str):
         if len(character) != 1:
@@ -205,10 +273,17 @@ def font_glyph(
     if code > 255:
         code = ord("?")
     native = _library(library)
-    pointer = native.raw.sr_font_glyph(code)
+    selected = _font(font)
+    if selected is Font.FIXED_8X16:
+        pointer = native.raw.sr_font_glyph(code)
+        height = FONT_HEIGHT
+    else:
+        _require_selectable_fonts(native)
+        pointer = native.raw.sr_font_glyph_in(int(selected), code)
+        height = font_height(selected, library=native)
     if not pointer:
-        raise SoftRasterError("sr_font_glyph returned a null pointer")
-    return ctypes.string_at(pointer, FONT_HEIGHT)
+        raise SoftRasterError("native font glyph lookup returned a null pointer")
+    return ctypes.string_at(pointer, height)
 
 
 def _path_bytes(path: str | bytes | os.PathLike[str] | os.PathLike[bytes]) -> bytes:
@@ -319,6 +394,10 @@ class Canvas:
         if not native.raw.sr_load_ppm(ctypes.byref(temporary), encoded):
             error_number = ctypes.get_errno()
             native.raw.sr_canvas_free(ctypes.byref(temporary))
+            if error_number in (errno.EINVAL, errno.EOVERFLOW, errno.ERANGE):
+                raise ImageFormatError(
+                    f"could not decode P6 PPM: {os.fsdecode(encoded)}"
+                )
             if error_number:
                 raise OSError(error_number, os.strerror(error_number), os.fsdecode(encoded))
             if not Path(os.fsdecode(encoded)).exists():
@@ -755,10 +834,11 @@ class Canvas:
         value: ColorLike,
         alpha: float,
         scale: int,
+        font: Font | int | None = None,
     ) -> "Canvas":
         self._require_open()
         function = getattr(self._library.raw, function_name)
-        function(
+        arguments = (
             ctypes.byref(self._canvas),
             _floating(x, "x", coordinate=True),
             _floating(y, "y", coordinate=True),
@@ -767,6 +847,10 @@ class Canvas:
             _floating(alpha, "alpha"),
             _integer(scale, "scale"),
         )
+        if font is None:
+            function(*arguments)
+        else:
+            function(int(_font(font)), *arguments)
         return self
 
     def text(
@@ -777,8 +861,18 @@ class Canvas:
         value: ColorLike,
         alpha: float = 1.0,
         scale: int = 1,
+        *,
+        font: Font | int = Font.FIXED_8X16,
     ) -> "Canvas":
-        return self._draw_text("sr_text", x, y, text, value, alpha, scale)
+        selected = _font(font)
+        if selected is Font.FIXED_8X16:
+            return self._draw_text(
+                "sr_text", x, y, text, value, alpha, scale
+            )
+        _require_selectable_fonts(self._library)
+        return self._draw_text(
+            "sr_text_in", x, y, text, value, alpha, scale, selected
+        )
 
     def text_center(
         self,
@@ -788,9 +882,24 @@ class Canvas:
         value: ColorLike,
         alpha: float = 1.0,
         scale: int = 1,
+        *,
+        font: Font | int = Font.FIXED_8X16,
     ) -> "Canvas":
+        selected = _font(font)
+        if selected is Font.FIXED_8X16:
+            return self._draw_text(
+                "sr_text_center", center_x, y, text, value, alpha, scale
+            )
+        _require_selectable_fonts(self._library)
         return self._draw_text(
-            "sr_text_center", center_x, y, text, value, alpha, scale
+            "sr_text_center_in",
+            center_x,
+            y,
+            text,
+            value,
+            alpha,
+            scale,
+            selected,
         )
 
     def text_outlined(
@@ -931,11 +1040,8 @@ class Canvas:
         )
         return self
 
-    def pack_rgba_into(self, buffer: Any) -> int:
-        """Pack R,G,B,A bytes into a writable buffer and return bytes written."""
-
-        self._require_open()
-        byte_count = self.pixel_count * 4
+    @staticmethod
+    def _writable_byte_view(buffer: Any, byte_count: int) -> memoryview:
         try:
             view = memoryview(buffer)
         except TypeError as error:
@@ -952,13 +1058,27 @@ class Canvas:
             raise BufferError(
                 f"buffer needs at least {byte_count} bytes, got {byte_view.nbytes}"
             )
+        return byte_view
+
+    def _pack_into(self, buffer: Any, channels: int, function_name: str) -> int:
+        self._require_open()
+        byte_count = self.pixel_count * channels
+        byte_view = self._writable_byte_view(buffer, byte_count)
         output_type = ctypes.c_uint8 * byte_count
         output = output_type.from_buffer(byte_view)
-        if not self._library.raw.sr_pack_rgba(
+        function = getattr(self._library.raw, function_name)
+        if not function(
             ctypes.byref(self._canvas), output, byte_count
         ):
-            raise SoftRasterError("sr_pack_rgba rejected a correctly sized buffer")
+            raise SoftRasterError(
+                f"{function_name} rejected a correctly sized buffer"
+            )
         return byte_count
+
+    def pack_rgba_into(self, buffer: Any) -> int:
+        """Pack R,G,B,A bytes into a writable buffer and return bytes written."""
+
+        return self._pack_into(buffer, 4, "sr_pack_rgba")
 
     def rgba_bytes(self) -> bytes:
         """Return the canvas packed in R,G,B,A byte order."""
@@ -967,21 +1087,39 @@ class Canvas:
         self.pack_rgba_into(output)
         return bytes(output)
 
+    def pack_rgb_into(self, buffer: Any) -> int:
+        """Pack R,G,B bytes into a writable buffer and return bytes written."""
+
+        if self._library.supports_rgb_pack:
+            return self._pack_into(buffer, 3, "sr_pack_rgb")
+        self._require_open()
+        byte_count = self.pixel_count * 3
+        output = self._writable_byte_view(buffer, byte_count)
+        rgba = self.rgba_bytes()
+        output[0:byte_count:3] = rgba[0::4]
+        output[1:byte_count:3] = rgba[1::4]
+        output[2:byte_count:3] = rgba[2::4]
+        return byte_count
+
     def rgb_bytes(self) -> bytes:
         """Return tightly packed RGB bytes, suitable for Kitty presentation."""
 
-        rgba = self.rgba_bytes()
         output = bytearray(self.pixel_count * 3)
-        output[0::3] = rgba[0::4]
-        output[1::3] = rgba[1::4]
-        output[2::3] = rgba[2::4]
+        self.pack_rgb_into(output)
         return bytes(output)
 
     def ppm_bytes(self) -> bytes:
         """Return a complete binary P6 PPM document without touching disk."""
 
         header = f"P6\n{self.width} {self.height}\n255\n".encode("ascii")
-        return header + self.rgb_bytes()
+        output = bytearray(len(header) + self.pixel_count * 3)
+        output[:len(header)] = header
+        view = memoryview(output)
+        try:
+            self.pack_rgb_into(view[len(header):])
+        finally:
+            view.release()
+        return bytes(output)
 
     def write_ppm(
         self, path: str | bytes | os.PathLike[str] | os.PathLike[bytes]

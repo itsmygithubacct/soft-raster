@@ -21,12 +21,27 @@
 
 static float clampf(float v, float lo, float hi)
 {
-    return v < lo ? lo : v > hi ? hi : v;
+    if (!(v >= lo)) return lo;
+    return v > hi ? hi : v;
+}
+
+static bool dimensions_ok(int w, int h, size_t *pixel_count)
+{
+    size_t pixels;
+
+    if (w <= 0 || h <= 0 || (size_t)w > SIZE_MAX / (size_t)h)
+        return false;
+    pixels = (size_t)w * (size_t)h;
+    if (pixels > (size_t)INT_MAX ||
+        pixels > SIZE_MAX / sizeof(uint32_t)) return false;
+    if (pixel_count != NULL) *pixel_count = pixels;
+    return true;
 }
 
 static bool canvas_ok(const sr_canvas *c)
 {
-    return c != NULL && c->px != NULL && c->w > 0 && c->h > 0;
+    return c != NULL && c->px != NULL &&
+           dimensions_ok(c->w, c->h, NULL);
 }
 
 static void reset_clip(sr_canvas *c)
@@ -41,17 +56,13 @@ static void reset_clip(sr_canvas *c)
 
 bool sr_canvas_init(sr_canvas *c, int w, int h)
 {
+    size_t pixels;
+    uint32_t *px;
+
     if (c == NULL) return false;
-    c->px = NULL;
-    c->w = 0;
-    c->h = 0;
-    reset_clip(c);
-    c->owns_px = false;
-    if (w <= 0 || h <= 0) return false;
-    /* The pixel count must fit an int and the byte count a size_t. */
-    if ((uint64_t)w * (uint64_t)h > (uint64_t)INT_MAX) return false;
-    if ((size_t)w > SIZE_MAX / sizeof(uint32_t) / (size_t)h) return false;
-    uint32_t *px = calloc((size_t)w * (size_t)h, sizeof(uint32_t));
+    *c = (sr_canvas){0};
+    if (!dimensions_ok(w, h, &pixels)) return false;
+    px = calloc(pixels, sizeof(uint32_t));
     if (px == NULL) return false;
     c->px = px;
     c->w = w;
@@ -64,9 +75,11 @@ bool sr_canvas_init(sr_canvas *c, int w, int h)
 void sr_canvas_wrap(sr_canvas *c, uint32_t *mem, int w, int h)
 {
     if (c == NULL) return;
+    *c = (sr_canvas){0};
+    if (mem == NULL || !dimensions_ok(w, h, NULL)) return;
     c->px = mem;
-    c->w = mem != NULL && w > 0 ? w : 0;
-    c->h = mem != NULL && h > 0 ? h : 0;
+    c->w = w;
+    c->h = h;
     c->owns_px = false;
     reset_clip(c);
 }
@@ -75,11 +88,7 @@ void sr_canvas_free(sr_canvas *c)
 {
     if (c == NULL) return;
     if (c->owns_px) free(c->px);
-    c->px = NULL;
-    c->w = 0;
-    c->h = 0;
-    c->owns_px = false;
-    reset_clip(c);
+    *c = (sr_canvas){0};
 }
 
 void sr_canvas_set_clip(sr_canvas *c, int x, int y, int w, int h)
@@ -102,8 +111,10 @@ void sr_canvas_reset_clip(sr_canvas *c)
 
 bool sr_pack_rgba(const sr_canvas *c, uint8_t *rgba, size_t byte_count)
 {
-    if (!canvas_ok(c) || rgba == NULL) return false;
-    size_t pixels = (size_t)c->w * (size_t)c->h;
+    size_t pixels;
+
+    if (!canvas_ok(c) || rgba == NULL ||
+        !dimensions_ok(c->w, c->h, &pixels)) return false;
     if (pixels > SIZE_MAX / 4u || byte_count < pixels * 4u) return false;
     for (size_t i = 0u; i < pixels; i++) {
         uint32_t pixel = c->px[i];
@@ -112,6 +123,28 @@ bool sr_pack_rgba(const sr_canvas *c, uint8_t *rgba, size_t byte_count)
         rgba[i * 4u + 2u] = (uint8_t)pixel;
         rgba[i * 4u + 3u] = (uint8_t)(pixel >> 24);
     }
+    return true;
+}
+
+static void pack_rgb_pixels(const uint32_t *pixels, uint8_t *rgb,
+                            size_t pixel_count)
+{
+    for (size_t i = 0u; i < pixel_count; ++i) {
+        const uint32_t pixel = pixels[i];
+        rgb[i * 3u] = (uint8_t)(pixel >> 16);
+        rgb[i * 3u + 1u] = (uint8_t)(pixel >> 8);
+        rgb[i * 3u + 2u] = (uint8_t)pixel;
+    }
+}
+
+bool sr_pack_rgb(const sr_canvas *c, uint8_t *rgb, size_t byte_count)
+{
+    size_t pixels;
+
+    if (!canvas_ok(c) || rgb == NULL ||
+        !dimensions_ok(c->w, c->h, &pixels)) return false;
+    if (pixels > SIZE_MAX / 3u || byte_count < pixels * 3u) return false;
+    pack_rgb_pixels(c->px, rgb, pixels);
     return true;
 }
 
@@ -151,10 +184,22 @@ uint32_t sr_scale_rgb(uint32_t rgb, float k)
 
 void sr_clear(sr_canvas *c, uint32_t rgb)
 {
+    size_t i = 0u;
+
     if (!canvas_ok(c)) return;
     uint32_t value = 0xff000000u | (rgb & 0x00ffffffu);
     size_t n = (size_t)c->w * (size_t)c->h;
-    for (size_t i = 0; i < n; i++)
+    for (; i + 8u <= n; i += 8u) {
+        c->px[i] = value;
+        c->px[i + 1u] = value;
+        c->px[i + 2u] = value;
+        c->px[i + 3u] = value;
+        c->px[i + 4u] = value;
+        c->px[i + 5u] = value;
+        c->px[i + 6u] = value;
+        c->px[i + 7u] = value;
+    }
+    for (; i < n; ++i)
         c->px[i] = value;
 }
 
@@ -169,13 +214,14 @@ void sr_px(sr_canvas *c, int x, int y, uint32_t rgb)
 /* Core blend, shared by every primitive.  ai is coverage in [0,256]; the
  * RGB channels lerp toward the color and the alpha byte lerps toward 255
  * with the same arithmetic-shift fixed-point step the games use. */
-static void blend_px(sr_canvas *c, int x, int y, uint32_t rgb, float a)
+static void blend_px_unchecked(sr_canvas *c, int x, int y, uint32_t rgb,
+                               float a)
 {
-    if (x < c->clip_x0 || x >= c->clip_x1 ||
-        y < c->clip_y0 || y >= c->clip_y1) return;
-    int ai = (int)(a * 256.0f + 0.5f);
+    int ai;
+
+    if (!(a > 0.0f)) return;
+    ai = a >= 1.0f ? 256 : (int)(a * 256.0f + 0.5f);
     if (ai <= 0) return;
-    if (ai > 256) ai = 256;
     uint32_t *p = &c->px[(size_t)y * (size_t)c->w + (size_t)x];
     uint32_t d = *p;
     int dr = (int)((d >> 16) & 255u);
@@ -193,23 +239,37 @@ static void blend_px(sr_canvas *c, int x, int y, uint32_t rgb, float a)
          ((uint32_t)dg << 8) | (uint32_t)db;
 }
 
+static void blend_px(sr_canvas *c, int x, int y, uint32_t rgb, float a)
+{
+    if (x < c->clip_x0 || x >= c->clip_x1 ||
+        y < c->clip_y0 || y >= c->clip_y1) return;
+    blend_px_unchecked(c, x, y, rgb, a);
+}
+
 void sr_blend(sr_canvas *c, int x, int y, uint32_t rgb, float alpha)
 {
     if (!canvas_ok(c)) return;
     blend_px(c, x, y, rgb, alpha);
 }
 
-/* Clip a float coordinate range to [0, limit) and convert to ints.  The
- * clip only discards pixels blend_px would reject anyway, but it keeps the
- * loop bounds small and the float-to-int casts in range. */
-static int clip_lo(float v)
+/* Clip a floating-point coordinate range to the active canvas clip and
+ * convert it to ints.  This keeps loops bounded and casts representable. */
+static int clip_lo(double v, int lower, int upper)
 {
-    return (int)fmaxf(floorf(v), 0.0f);
+    const double rounded = floor(v);
+
+    if (isnan(v) || rounded <= (double)lower) return lower;
+    if (rounded >= (double)upper) return upper;
+    return (int)rounded;
 }
 
-static int clip_hi(float v, int limit)
+static int clip_hi(double v, int lower, int upper)
 {
-    return (int)fminf(ceilf(v), (float)limit);
+    const double rounded = ceil(v);
+
+    if (isnan(v) || rounded <= (double)lower) return lower;
+    if (rounded >= (double)upper) return upper;
+    return (int)rounded;
 }
 
 /* ------------------------------------------------------------ primitives */
@@ -217,9 +277,18 @@ static int clip_hi(float v, int limit)
 void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
                   uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c) || w <= 0.0f || h <= 0.0f) return;
-    int x0 = clip_lo(x), x1 = clip_hi(x + w, c->w);
-    int y0 = clip_lo(y), y1 = clip_hi(y + h, c->h);
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+
+    if (!canvas_ok(c) || !isfinite(x) || !isfinite(y) ||
+        !isfinite(w) || !isfinite(h) || w <= 0.0f || h <= 0.0f ||
+        !(alpha > 0.0f)) return;
+    x0 = clip_lo(x, c->clip_x0, c->clip_x1);
+    x1 = clip_hi(x + w, c->clip_x0, c->clip_x1);
+    y0 = clip_lo(y, c->clip_y0, c->clip_y1);
+    y1 = clip_hi(y + h, c->clip_y0, c->clip_y1);
     for (int py = y0; py < y1; py++) {
         float cy = fminf((float)(py + 1), y + h) - fmaxf((float)py, y);
         if (cy <= 0.0f) continue;
@@ -228,7 +297,7 @@ void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
             float cx = fminf((float)(px + 1), x + w) - fmaxf((float)px, x);
             if (cx <= 0.0f) continue;
             if (cx > 1.0f) cx = 1.0f;
-            blend_px(c, px, py, rgb, alpha * cx * cy);
+            blend_px_unchecked(c, px, py, rgb, alpha * cx * cy);
         }
     }
 }
@@ -236,6 +305,8 @@ void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
 void sr_stroke_rect(sr_canvas *c, float x, float y, float w, float h,
                     float line, uint32_t rgb, float alpha)
 {
+    if (!isfinite(x) || !isfinite(y) || !isfinite(w) || !isfinite(h) ||
+        !isfinite(line) || line <= 0.0f) return;
     sr_fill_rect(c, x, y, w, line, rgb, alpha);
     sr_fill_rect(c, x, y + h - line, w, line, rgb, alpha);
     sr_fill_rect(c, x, y, line, h, rgb, alpha);
@@ -245,26 +316,33 @@ void sr_stroke_rect(sr_canvas *c, float x, float y, float w, float h,
 void sr_fill_circle(sr_canvas *c, float cx, float cy, float r,
                     uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c) || r <= 0.0f) return;
+    int y0;
+    int y1;
+
+    if (!canvas_ok(c) || !isfinite(cx) || !isfinite(cy) ||
+        !isfinite(r) || r <= 0.0f || !(alpha > 0.0f)) return;
     float r_out = r + 0.5f, r_in = r - 0.5f;
     float r_out2 = r_out * r_out;
     float r_in2 = r_in > 0.0f ? r_in * r_in : 0.0f;
-    int y0 = clip_lo(cy - r_out), y1 = clip_hi(cy + r_out, c->h) - 1;
+    y0 = clip_lo(cy - r_out, c->clip_y0, c->clip_y1);
+    y1 = clip_hi(cy + r_out, c->clip_y0, c->clip_y1) - 1;
     for (int y = y0; y <= y1; y++) {
         float dy = (float)y + 0.5f - cy;
         float w2 = r_out2 - dy * dy;
         if (w2 <= 0.0f) continue;
         float half = sqrtf(w2);
-        int x0 = clip_lo(cx - half), x1 = clip_hi(cx + half, c->w) - 1;
+        int x0 = clip_lo(cx - half, c->clip_x0, c->clip_x1);
+        int x1 = clip_hi(cx + half, c->clip_x0, c->clip_x1) - 1;
         for (int x = x0; x <= x1; x++) {
             float dx = (float)x + 0.5f - cx;
             float d2 = dx * dx + dy * dy;
             if (d2 >= r_out2) continue;
             if (d2 <= r_in2) {
-                blend_px(c, x, y, rgb, alpha);
+                blend_px_unchecked(c, x, y, rgb, alpha);
             } else {
                 float cov = r_out - sqrtf(d2);
-                blend_px(c, x, y, rgb, alpha * (cov > 1.0f ? 1.0f : cov));
+                blend_px_unchecked(c, x, y, rgb,
+                                   alpha * (cov > 1.0f ? 1.0f : cov));
             }
         }
     }
@@ -273,11 +351,18 @@ void sr_fill_circle(sr_canvas *c, float cx, float cy, float r,
 void sr_fill_ellipse(sr_canvas *c, float cx, float cy, float rx, float ry,
                      uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c) || rx <= 0.0f || ry <= 0.0f) return;
-    int x0 = clip_lo(cx - rx - 1.0f);
-    int x1 = clip_hi(cx + rx + 1.0f, c->w);
-    int y0 = clip_lo(cy - ry - 1.0f);
-    int y1 = clip_hi(cy + ry + 1.0f, c->h);
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+
+    if (!canvas_ok(c) || !isfinite(cx) || !isfinite(cy) ||
+        !isfinite(rx) || !isfinite(ry) || rx <= 0.0f || ry <= 0.0f ||
+        !(alpha > 0.0f)) return;
+    x0 = clip_lo(cx - rx - 1.0f, c->clip_x0, c->clip_x1);
+    x1 = clip_hi(cx + rx + 1.0f, c->clip_x0, c->clip_x1);
+    y0 = clip_lo(cy - ry - 1.0f, c->clip_y0, c->clip_y1);
+    y1 = clip_hi(cy + ry + 1.0f, c->clip_y0, c->clip_y1);
     float edge_scale = fminf(rx, ry);
     for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {
@@ -286,7 +371,8 @@ void sr_fill_ellipse(sr_canvas *c, float cx, float cy, float rx, float ry,
             float coverage = (1.0f - sqrtf(dx * dx + dy * dy)) * edge_scale
                            + 0.5f;
             if (coverage <= 0.0f) continue;
-            blend_px(c, x, y, rgb, alpha * fminf(coverage, 1.0f));
+            blend_px_unchecked(c, x, y, rgb,
+                               alpha * fminf(coverage, 1.0f));
         }
     }
 }
@@ -294,12 +380,19 @@ void sr_fill_ellipse(sr_canvas *c, float cx, float cy, float rx, float ry,
 void sr_ring(sr_canvas *c, float cx, float cy, float r, float width,
              uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c)) return;
+    int x0;
+    int x1;
+    int y0;
+    int y1;
+
+    if (!canvas_ok(c) || !isfinite(cx) || !isfinite(cy) ||
+        !isfinite(r) || !isfinite(width) || r <= 0.0f || width <= 0.0f ||
+        !(alpha > 0.0f)) return;
     float hw = width * 0.5f;
-    int x0 = clip_lo(cx - r - hw - 1.0f);
-    int x1 = clip_hi(cx + r + hw + 1.0f, c->w);
-    int y0 = clip_lo(cy - r - hw - 1.0f);
-    int y1 = clip_hi(cy + r + hw + 1.0f, c->h);
+    x0 = clip_lo(cx - r - hw - 1.0f, c->clip_x0, c->clip_x1);
+    x1 = clip_hi(cx + r + hw + 1.0f, c->clip_x0, c->clip_x1);
+    y0 = clip_lo(cy - r - hw - 1.0f, c->clip_y0, c->clip_y1);
+    y1 = clip_hi(cy + r + hw + 1.0f, c->clip_y0, c->clip_y1);
     for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {
             float dx = (float)x + 0.5f - cx;
@@ -307,7 +400,8 @@ void sr_ring(sr_canvas *c, float cx, float cy, float r, float width,
             float d = sqrtf(dx * dx + dy * dy);
             float cov = hw + 0.5f - fabsf(d - r);
             if (cov <= 0.0f) continue;
-            blend_px(c, x, y, rgb, alpha * (cov > 1.0f ? 1.0f : cov));
+            blend_px_unchecked(c, x, y, rgb,
+                               alpha * (cov > 1.0f ? 1.0f : cov));
         }
     }
 }
@@ -316,7 +410,9 @@ void sr_line(sr_canvas *c, float x0, float y0, float x1, float y1,
              float width, uint32_t rgb, float alpha,
              int dash_on, int dash_off)
 {
-    if (!canvas_ok(c)) return;
+    if (!canvas_ok(c) || !isfinite(x0) || !isfinite(y0) ||
+        !isfinite(x1) || !isfinite(y1) || !isfinite(width) ||
+        !(alpha > 0.0f)) return;
     float dx = x1 - x0, dy = y1 - y0;
     float len2 = dx * dx + dy * dy;
     float hw = width * 0.5f;
@@ -326,11 +422,15 @@ void sr_line(sr_canvas *c, float x0, float y0, float x1, float y1,
         return;
     }
     float len = sqrtf(len2);
-    int x_min = clip_lo(fminf(x0, x1) - hw - 1.0f);
-    int x_max = clip_hi(fmaxf(x0, x1) + hw + 1.0f, c->w);
-    int y_min = clip_lo(fminf(y0, y1) - hw - 1.0f);
-    int y_max = clip_hi(fmaxf(y0, y1) + hw + 1.0f, c->h);
-    int period = dash_on + dash_off;
+    int x_min = clip_lo(fminf(x0, x1) - hw - 1.0f,
+                        c->clip_x0, c->clip_x1);
+    int x_max = clip_hi(fmaxf(x0, x1) + hw + 1.0f,
+                        c->clip_x0, c->clip_x1);
+    int y_min = clip_lo(fminf(y0, y1) - hw - 1.0f,
+                        c->clip_y0, c->clip_y1);
+    int y_max = clip_hi(fmaxf(y0, y1) + hw + 1.0f,
+                        c->clip_y0, c->clip_y1);
+    int64_t period = (int64_t)dash_on + (int64_t)dash_off;
     for (int y = y_min; y < y_max; y++) {
         for (int x = x_min; x < x_max; x++) {
             float px = (float)x + 0.5f - x0;
@@ -341,9 +441,9 @@ void sr_line(sr_canvas *c, float x0, float y0, float x1, float y1,
             float cov = hw + 0.5f - sqrtf(qx * qx + qy * qy);
             if (cov <= 0.0f) continue;
             if (cov > 1.0f) cov = 1.0f;
-            if (period > 0 &&
+            if (dash_on >= 0 && dash_off >= 0 && period > 0 &&
                 fmodf(t * len, (float)period) >= (float)dash_on) continue;
-            blend_px(c, x, y, rgb, alpha * cov);
+            blend_px_unchecked(c, x, y, rgb, alpha * cov);
         }
     }
 }
@@ -354,14 +454,36 @@ static float edge_fn(float ax, float ay, float bx, float by,
     return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
 }
 
+static double edge_fn_double(double ax, double ay, double bx, double by,
+                             double px, double py)
+{
+    return (px - ax) * (by - ay) - (py - ay) * (bx - ax);
+}
+
 void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
                       float x2, float y2, uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c)) return;
-    int min_x = clip_lo(fminf(x0, fminf(x1, x2)) - 1.0f);
-    int max_x = clip_hi(fmaxf(x0, fmaxf(x1, x2)) + 1.0f, c->w) - 1;
-    int min_y = clip_lo(fminf(y0, fminf(y1, y2)) - 1.0f);
-    int max_y = clip_hi(fmaxf(y0, fmaxf(y1, y2)) + 1.0f, c->h) - 1;
+    int min_x;
+    int max_x;
+    int min_y;
+    int max_y;
+    float area;
+
+    if (!canvas_ok(c) || !isfinite(x0) || !isfinite(y0) ||
+        !isfinite(x1) || !isfinite(y1) || !isfinite(x2) || !isfinite(y2) ||
+        !(alpha > 0.0f)) return;
+    area = edge_fn(x0, y0, x1, y1, x2, y2);
+    if (area == 0.0f ||
+        (!isfinite(area) &&
+         edge_fn_double(x0, y0, x1, y1, x2, y2) == 0.0)) return;
+    min_x = clip_lo(fminf(x0, fminf(x1, x2)) - 1.0f,
+                    c->clip_x0, c->clip_x1);
+    max_x = clip_hi(fmaxf(x0, fmaxf(x1, x2)) + 1.0f,
+                    c->clip_x0, c->clip_x1) - 1;
+    min_y = clip_lo(fminf(y0, fminf(y1, y2)) - 1.0f,
+                    c->clip_y0, c->clip_y1);
+    max_y = clip_hi(fmaxf(y0, fmaxf(y1, y2)) + 1.0f,
+                    c->clip_y0, c->clip_y1) - 1;
     for (int y = min_y; y <= max_y; y++) {
         for (int x = min_x; x <= max_x; x++) {
             float px = (float)x + 0.5f;
@@ -369,10 +491,22 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
             float e0 = edge_fn(x0, y0, x1, y1, px, py);
             float e1 = edge_fn(x1, y1, x2, y2, px, py);
             float e2 = edge_fn(x2, y2, x0, y0, px, py);
-            bool neg = e0 < 0.0f || e1 < 0.0f || e2 < 0.0f;
-            bool pos = e0 > 0.0f || e1 > 0.0f || e2 > 0.0f;
+            bool neg;
+            bool pos;
+
+            if (isfinite(e0) && isfinite(e1) && isfinite(e2)) {
+                neg = e0 < 0.0f || e1 < 0.0f || e2 < 0.0f;
+                pos = e0 > 0.0f || e1 > 0.0f || e2 > 0.0f;
+            } else {
+                const double de0 = edge_fn_double(x0, y0, x1, y1, px, py);
+                const double de1 = edge_fn_double(x1, y1, x2, y2, px, py);
+                const double de2 = edge_fn_double(x2, y2, x0, y0, px, py);
+
+                neg = de0 < 0.0 || de1 < 0.0 || de2 < 0.0;
+                pos = de0 > 0.0 || de1 > 0.0 || de2 > 0.0;
+            }
             if (!(neg && pos))
-                blend_px(c, x, y, rgb, alpha);
+                blend_px_unchecked(c, x, y, rgb, alpha);
         }
     }
 }
@@ -380,16 +514,20 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
 void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
                     size_t count, uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u) return;
+    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u ||
+        !(alpha > 0.0f) || !isfinite(xs[0]) || !isfinite(ys[0])) return;
     float min_x = xs[0], max_x = xs[0], min_y = ys[0], max_y = ys[0];
     for (size_t i = 1u; i < count; i++) {
+        if (!isfinite(xs[i]) || !isfinite(ys[i])) return;
         min_x = fminf(min_x, xs[i]);
         max_x = fmaxf(max_x, xs[i]);
         min_y = fminf(min_y, ys[i]);
         max_y = fmaxf(max_y, ys[i]);
     }
-    int x0 = clip_lo(min_x), x1 = clip_hi(max_x, c->w);
-    int y0 = clip_lo(min_y), y1 = clip_hi(max_y, c->h);
+    int x0 = clip_lo(min_x, c->clip_x0, c->clip_x1);
+    int x1 = clip_hi(max_x, c->clip_x0, c->clip_x1);
+    int y0 = clip_lo(min_y, c->clip_y0, c->clip_y1);
+    int y1 = clip_hi(max_y, c->clip_y0, c->clip_y1);
     for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {
             float px = (float)x + 0.5f, py = (float)y + 0.5f;
@@ -397,11 +535,19 @@ void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
             for (size_t i = 0u; i < count; i++) {
                 size_t next = i + 1u == count ? 0u : i + 1u;
                 float edge = edge_fn(xs[i], ys[i], xs[next], ys[next], px, py);
-                negative = negative || edge < 0.0f;
-                positive = positive || edge > 0.0f;
+                if (isfinite(edge)) {
+                    negative = negative || edge < 0.0f;
+                    positive = positive || edge > 0.0f;
+                } else {
+                    const double precise = edge_fn_double(
+                        xs[i], ys[i], xs[next], ys[next], px, py);
+
+                    negative = negative || precise < 0.0;
+                    positive = positive || precise > 0.0;
+                }
             }
             if (!(negative && positive))
-                blend_px(c, x, y, rgb, alpha);
+                blend_px_unchecked(c, x, y, rgb, alpha);
         }
     }
 }
@@ -419,20 +565,24 @@ void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
 void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
                      size_t count, uint32_t rgb, float alpha)
 {
-    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u) return;
+    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u ||
+        count > SIZE_MAX / sizeof(double) || !(alpha > 0.0f) ||
+        !isfinite(xs[0]) || !isfinite(ys[0])) return;
 
     float min_y = ys[0], max_y = ys[0];
     for (size_t i = 1u; i < count; i++) {
+        if (!isfinite(xs[i]) || !isfinite(ys[i])) return;
         min_y = fminf(min_y, ys[i]);
         max_y = fmaxf(max_y, ys[i]);
     }
-    int y0 = clip_lo(min_y), y1 = clip_hi(max_y, c->h);
+    int y0 = clip_lo(min_y, c->clip_y0, c->clip_y1);
+    int y1 = clip_hi(max_y, c->clip_y0, c->clip_y1);
     if (y0 >= y1) return;
 
-    float stack_crossings[POLY_STACK_CROSSINGS];
-    float *crossings = stack_crossings;
+    double stack_crossings[POLY_STACK_CROSSINGS];
+    double *crossings = stack_crossings;
     if (count > POLY_STACK_CROSSINGS) {
-        crossings = (float *)malloc(count * sizeof(float));
+        crossings = (double *)malloc(count * sizeof(double));
         if (crossings == NULL) return;
     }
 
@@ -447,13 +597,21 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
              * all.  Without this a scanline through a vertex fills the
              * wrong side of it. */
             if ((yi <= py) == (yj <= py)) continue;
-            crossings[found++] =
-                xs[i] + (py - yi) / (yj - yi) * (xs[next] - xs[i]);
+            {
+                const float crossing =
+                    xs[i] + (py - yi) / (yj - yi) * (xs[next] - xs[i]);
+
+                crossings[found++] = isfinite(crossing)
+                    ? (double)crossing
+                    : (double)xs[i] + ((double)py - (double)yi) /
+                      ((double)yj - (double)yi) *
+                      ((double)xs[next] - (double)xs[i]);
+            }
         }
         if (found < 2u) continue;
 
         for (size_t a = 1u; a < found; a++) {   /* insertion sort: found is small */
-            float v = crossings[a];
+            double v = crossings[a];
             size_t b = a;
             while (b > 0u && crossings[b - 1u] > v) {
                 crossings[b] = crossings[b - 1u];
@@ -464,12 +622,12 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
 
         for (size_t k = 0u; k + 1u < found; k += 2u) {
             /* Pixel x is inside when its center x + 0.5 falls in the span. */
-            int sx = (int)ceilf(crossings[k] - 0.5f);
-            int ex = (int)ceilf(crossings[k + 1u] - 0.5f);
-            if (sx < 0) sx = 0;
-            if (ex > c->w) ex = c->w;
+            int sx = clip_hi(crossings[k] - 0.5,
+                             c->clip_x0, c->clip_x1);
+            int ex = clip_hi(crossings[k + 1u] - 0.5,
+                             c->clip_x0, c->clip_x1);
             for (int x = sx; x < ex; x++)
-                blend_px(c, x, y, rgb, alpha);
+                blend_px_unchecked(c, x, y, rgb, alpha);
         }
     }
 
@@ -478,11 +636,20 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
 
 /* ------------------------------------------------------------------ text */
 
+static int text_width_for(size_t length, int advance, int scale)
+{
+    if (scale < 1) scale = 1;
+    if (advance <= 0 || scale > INT_MAX / advance) return INT_MAX;
+    {
+        const int per_character = advance * scale;
+        if (length > (size_t)INT_MAX / (size_t)per_character) return INT_MAX;
+        return (int)length * per_character;
+    }
+}
+
 int sr_text_width(const char *s, int scale)
 {
-    if (s == NULL) return 0;
-    if (scale < 1) scale = 1;
-    return (int)strlen(s) * SR_FONT_W * scale;
+    return s == NULL ? 0 : text_width_for(strlen(s), SR_FONT_W, scale);
 }
 
 const uint8_t *sr_font_glyph(unsigned char ch)
@@ -491,32 +658,77 @@ const uint8_t *sr_font_glyph(unsigned char ch)
     return font8x16[ch - 32u];
 }
 
-static void draw_glyph(sr_canvas *c, int x, int y, const unsigned char *glyph,
-                       uint32_t rgb, float alpha, int scale, int height)
+static void draw_glyph(sr_canvas *c, double x, double y,
+                       const unsigned char *glyph, uint32_t rgb, float alpha,
+                       int scale, int height)
 {
     for (int gy = 0; gy < height; gy++) {
-        unsigned row = glyph[gy];
+        const unsigned row = glyph[gy];
+        const double top = y + (double)gy * (double)scale;
+        const double bottom = top + (double)scale;
+        const int y0 = clip_lo(top, c->clip_y0, c->clip_y1);
+        const int y1 = clip_hi(bottom, c->clip_y0, c->clip_y1);
+
+        if (y0 >= y1) continue;
         for (int gx = 0; gx < SR_FONT_W; gx++) {
+            int x0;
+            int x1;
+            const double left = x + (double)gx * (double)scale;
+            const double right = left + (double)scale;
+
             if (!((row >> (7 - gx)) & 1u)) continue;
-            for (int sy = 0; sy < scale; sy++)
-                for (int sx = 0; sx < scale; sx++)
-                    blend_px(c, x + gx * scale + sx, y + gy * scale + sy,
-                             rgb, alpha);
+            x0 = clip_lo(left, c->clip_x0, c->clip_x1);
+            x1 = clip_hi(right, c->clip_x0, c->clip_x1);
+            for (int py = y0; py < y1; ++py)
+                for (int px = x0; px < x1; ++px)
+                    blend_px_unchecked(c, px, py, rgb, alpha);
         }
     }
+}
+
+/* Skip complete glyph cells to the left of the active clip.  Besides avoiding
+ * needless work, this bounds calls whose finite x coordinate is extremely
+ * negative instead of walking billions of invisible characters. */
+static const char *skip_clipped_text(const char *s, double *x,
+                                     double advance, int clip_left)
+{
+    double cells;
+    size_t length;
+    size_t skip;
+
+    if (*x >= (double)clip_left) return s;
+    cells = floor(((double)clip_left - *x) / advance);
+    if (!(cells > 0.0)) return s;
+    length = strlen(s);
+    if (cells >= (double)length) return s + length;
+    skip = (size_t)cells;
+    *x += (double)skip * advance;
+    return s + skip;
 }
 
 void sr_text(sr_canvas *c, float x, float y, const char *s,
              uint32_t rgb, float alpha, int scale)
 {
-    if (!canvas_ok(c) || s == NULL) return;
+    double ix;
+    double iy;
+    double advance;
+
+    if (!canvas_ok(c) || s == NULL || !isfinite(x) || !isfinite(y) ||
+        !(alpha > 0.0f)) return;
     if (scale < 1) scale = 1;
-    int ix = (int)x, iy = (int)y;
+    ix = trunc((double)x);
+    iy = trunc((double)y);
+    advance = (double)SR_FONT_W * (double)scale;
+    if (iy >= (double)c->clip_y1 ||
+        iy + (double)SR_FONT_H * (double)scale <=
+            (double)c->clip_y0) return;
+    s = skip_clipped_text(s, &ix, advance, c->clip_x0);
     for (; *s; s++) {
-        unsigned char ch = (unsigned char)*s;
+        const unsigned char ch = (unsigned char)*s;
+        if (ix >= (double)c->clip_x1) break;
         draw_glyph(c, ix, iy, sr_font_glyph(ch), rgb, alpha, scale,
                    SR_FONT_H);
-        ix += SR_FONT_W * scale;
+        ix += advance;
     }
 }
 
@@ -588,21 +800,32 @@ int sr_text_width_in(sr_font_id font, const char *s, int scale)
 {
     const sr_font_desc *d = font_desc(font);
     if (d == NULL || s == NULL) return 0;
-    if (scale < 1) scale = 1;
-    return (int)strlen(s) * d->advance * scale;
+    return text_width_for(strlen(s), d->advance, scale);
 }
 
 void sr_text_in(sr_font_id font, sr_canvas *c, float x, float y,
                 const char *s, uint32_t rgb, float alpha, int scale)
 {
     const sr_font_desc *d = font_desc(font);
-    if (d == NULL || !canvas_ok(c) || s == NULL) return;
+    double ix;
+    double iy;
+    double advance;
+
+    if (d == NULL || !canvas_ok(c) || s == NULL ||
+        !isfinite(x) || !isfinite(y) || !(alpha > 0.0f)) return;
     if (scale < 1) scale = 1;
-    int ix = (int)x, iy = (int)y;
+    ix = trunc((double)x);
+    iy = trunc((double)y);
+    advance = (double)d->advance * (double)scale;
+    if (iy >= (double)c->clip_y1 ||
+        iy + (double)d->height * (double)scale <=
+            (double)c->clip_y0) return;
+    s = skip_clipped_text(s, &ix, advance, c->clip_x0);
     for (; *s; s++) {
+        if (ix >= (double)c->clip_x1) break;
         draw_glyph(c, ix, iy, sr_font_glyph_in(font, (unsigned char)*s),
                    rgb, alpha, scale, d->height);
-        ix += d->advance * scale;
+        ix += advance;
     }
 }
 
@@ -616,20 +839,56 @@ void sr_text_center_in(sr_font_id font, sr_canvas *c, float cx, float y,
 
 /* ----------------------------------------------------------------- blits */
 
+typedef struct blit_region {
+    int x0;
+    int y0;
+    int x1;
+    int y1;
+} blit_region;
+
+static bool source_blit_region(const sr_canvas *dst, const sr_canvas *src,
+                               int x, int y, blit_region *region)
+{
+    const int64_t right = (int64_t)x + src->w;
+    const int64_t bottom = (int64_t)y + src->h;
+    const int64_t visible_width = (int64_t)dst->w - x;
+    const int64_t visible_height = (int64_t)dst->h - y;
+
+    if (right <= 0 || bottom <= 0 || x >= dst->w || y >= dst->h)
+        return false;
+    region->x0 = x < 0 ? (int)(-(int64_t)x) : 0;
+    region->y0 = y < 0 ? (int)(-(int64_t)y) : 0;
+    region->x1 = (int64_t)src->w < visible_width
+        ? src->w : (int)visible_width;
+    region->y1 = (int64_t)src->h < visible_height
+        ? src->h : (int)visible_height;
+    return region->x0 < region->x1 && region->y0 < region->y1;
+}
+
 void sr_blit(sr_canvas *dst, const sr_canvas *src, int x, int y)
 {
+    blit_region region;
+    int first;
+    int stop;
+    int step;
+
     if (!canvas_ok(dst) || !canvas_ok(src)) return;
-    if (x <= -src->w || y <= -src->h || x >= dst->w || y >= dst->h) return;
-    int sx0 = x < 0 ? -x : 0;
-    int sy0 = y < 0 ? -y : 0;
-    int sx1 = src->w < dst->w - x ? src->w : dst->w - x;
-    int sy1 = src->h < dst->h - y ? src->h : dst->h - y;
-    for (int sy = sy0; sy < sy1; sy++) {
-        const uint32_t *from = &src->px[(size_t)sy * (size_t)src->w + (size_t)sx0];
+    if (!source_blit_region(dst, src, x, y, &region)) return;
+    first = region.y0;
+    stop = region.y1;
+    step = 1;
+    if (dst->px == src->px && y > 0) {
+        first = region.y1 - 1;
+        stop = region.y0 - 1;
+        step = -1;
+    }
+    for (int sy = first; sy != stop; sy += step) {
+        const uint32_t *from = &src->px[(size_t)sy * (size_t)src->w +
+                                        (size_t)region.x0];
         uint32_t *to = &dst->px[(size_t)(y + sy) * (size_t)dst->w +
-                                (size_t)(x + sx0)];
-        if (sx1 > sx0)
-            memcpy(to, from, (size_t)(sx1 - sx0) * sizeof(uint32_t));
+                                (size_t)(x + region.x0)];
+        memmove(to, from,
+                (size_t)(region.x1 - region.x0) * sizeof(uint32_t));
     }
 }
 
@@ -640,6 +899,10 @@ static void composite_px(uint32_t *to, uint32_t s, int ga)
 {
     int sa = ((int)(s >> 24) * ga) / 255;
     if (sa <= 0) return;
+    if (sa >= 255) {
+        *to = s;
+        return;
+    }
     int inv = 255 - sa;
     uint32_t d = *to;
     int r = ((int)((s >> 16) & 255u) * ga) / 255 +
@@ -657,6 +920,10 @@ static void composite_tint_px(uint32_t *to, uint32_t s, int ga,
 {
     int sa = ((int)(s >> 24) * ga) / 255;
     if (sa <= 0) return;
+    if (sa >= 255) {
+        *to = UINT32_C(0xff000000) | (rgb & UINT32_C(0x00ffffff));
+        return;
+    }
     int inv = 255 - sa;
     uint32_t d = *to;
     int tr = (int)((rgb >> 16) & 255u);
@@ -673,15 +940,38 @@ static void composite_tint_px(uint32_t *to, uint32_t s, int ga,
 void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,
                    float alpha)
 {
+    blit_region region;
+    int y_first;
+    int y_stop;
+    int y_step;
+    int x_first;
+    int x_stop;
+    int x_step;
+
     if (!canvas_ok(dst) || !canvas_ok(src) || alpha <= 0.0f) return;
-    if (x <= -src->w || y <= -src->h || x >= dst->w || y >= dst->h) return;
+    if (!source_blit_region(dst, src, x, y, &region)) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
-    int sx0 = x < 0 ? -x : 0;
-    int sy0 = y < 0 ? -y : 0;
-    int sx1 = src->w < dst->w - x ? src->w : dst->w - x;
-    int sy1 = src->h < dst->h - y ? src->h : dst->h - y;
-    for (int sy = sy0; sy < sy1; sy++) {
-        for (int sx = sx0; sx < sx1; sx++) {
+    if (ga <= 0) return;
+    y_first = region.y0;
+    y_stop = region.y1;
+    y_step = 1;
+    x_first = region.x0;
+    x_stop = region.x1;
+    x_step = 1;
+    if (dst->px == src->px) {
+        if (y > 0) {
+            y_first = region.y1 - 1;
+            y_stop = region.y0 - 1;
+            y_step = -1;
+        }
+        if (x > 0) {
+            x_first = region.x1 - 1;
+            x_stop = region.x0 - 1;
+            x_step = -1;
+        }
+    }
+    for (int sy = y_first; sy != y_stop; sy += y_step) {
+        for (int sx = x_first; sx != x_stop; sx += x_step) {
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
             composite_px(&dst->px[(size_t)(y + sy) * (size_t)dst->w +
                                   (size_t)(x + sx)], s, ga);
@@ -692,15 +982,38 @@ void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,
 void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
                   uint32_t rgb, float alpha)
 {
+    blit_region region;
+    int y_first;
+    int y_stop;
+    int y_step;
+    int x_first;
+    int x_stop;
+    int x_step;
+
     if (!canvas_ok(dst) || !canvas_ok(src) || alpha <= 0.0f) return;
-    if (x <= -src->w || y <= -src->h || x >= dst->w || y >= dst->h) return;
+    if (!source_blit_region(dst, src, x, y, &region)) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
-    int sx0 = x < 0 ? -x : 0;
-    int sy0 = y < 0 ? -y : 0;
-    int sx1 = src->w < dst->w - x ? src->w : dst->w - x;
-    int sy1 = src->h < dst->h - y ? src->h : dst->h - y;
-    for (int sy = sy0; sy < sy1; sy++) {
-        for (int sx = sx0; sx < sx1; sx++) {
+    if (ga <= 0) return;
+    y_first = region.y0;
+    y_stop = region.y1;
+    y_step = 1;
+    x_first = region.x0;
+    x_stop = region.x1;
+    x_step = 1;
+    if (dst->px == src->px) {
+        if (y > 0) {
+            y_first = region.y1 - 1;
+            y_stop = region.y0 - 1;
+            y_step = -1;
+        }
+        if (x > 0) {
+            x_first = region.x1 - 1;
+            x_stop = region.x0 - 1;
+            x_step = -1;
+        }
+    }
+    for (int sy = y_first; sy != y_stop; sy += y_step) {
+        for (int sx = x_first; sx != x_stop; sx += x_step) {
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
             uint32_t *to = &dst->px[(size_t)(y + sy) * (size_t)dst->w +
                                     (size_t)(x + sx)];
@@ -712,21 +1025,65 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
 void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
                     int w, int h, float alpha)
 {
+    int dx0;
+    int dy0;
+    int dx1;
+    int dy1;
+    int source_x;
+    int source_x_step;
+    int source_x_remainder;
+    int source_y;
+    int source_y_step;
+    int source_y_remainder;
+    int64_t x_error_start;
+    int64_t y_error;
+
     if (!canvas_ok(dst) || !canvas_ok(src) || w <= 0 || h <= 0 ||
         alpha <= 0.0f) return;
-    if (x <= -w || y <= -h || x >= dst->w || y >= dst->h) return;
+    if ((int64_t)x + w <= 0 || (int64_t)y + h <= 0 ||
+        x >= dst->w || y >= dst->h) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
-    int dx0 = x < 0 ? -x : 0;
-    int dy0 = y < 0 ? -y : 0;
-    int dx1 = w < dst->w - x ? w : dst->w - x;
-    int dy1 = h < dst->h - y ? h : dst->h - y;
+    if (ga <= 0) return;
+    dx0 = x < 0 ? (int)(-(int64_t)x) : 0;
+    dy0 = y < 0 ? (int)(-(int64_t)y) : 0;
+    dx1 = (int64_t)w < (int64_t)dst->w - x
+        ? w : (int)((int64_t)dst->w - x);
+    dy1 = (int64_t)h < (int64_t)dst->h - y
+        ? h : (int)((int64_t)dst->h - y);
+    {
+        const int64_t numerator = (int64_t)dx0 * src->w;
+        source_x = (int)(numerator / w);
+        x_error_start = numerator % w;
+    }
+    source_x_step = src->w / w;
+    source_x_remainder = src->w % w;
+    {
+        const int64_t numerator = (int64_t)dy0 * src->h;
+        source_y = (int)(numerator / h);
+        y_error = numerator % h;
+    }
+    source_y_step = src->h / h;
+    source_y_remainder = src->h % h;
     for (int dy = dy0; dy < dy1; dy++) {
-        int sy = (int)((int64_t)dy * src->h / h);
+        int sx = source_x;
+        int64_t x_error = x_error_start;
         for (int dx = dx0; dx < dx1; dx++) {
-            int sx = (int)((int64_t)dx * src->w / w);
-            uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
+            uint32_t s = src->px[(size_t)source_y * (size_t)src->w +
+                                 (size_t)sx];
             composite_px(&dst->px[(size_t)(y + dy) * (size_t)dst->w +
                                   (size_t)(x + dx)], s, ga);
+            sx += source_x_step;
+            x_error += source_x_remainder;
+            if (x_error >= w) {
+                ++sx;
+                x_error -= w;
+            }
+        }
+        source_y += source_y_step;
+        y_error += source_y_remainder;
+        if (y_error >= h) {
+            ++source_y;
+            y_error -= h;
         }
     }
 }
@@ -755,6 +1112,7 @@ void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
     if ((int64_t)x + output_w <= 0 || (int64_t)y + output_h <= 0 ||
         x >= dst->w || y >= dst->h) return;
     ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+    if (ga <= 0) return;
     tx0 = x < 0 ? (int)(-(int64_t)x) : 0;
     ty0 = y < 0 ? (int)(-(int64_t)y) : 0;
     tx1 = (int64_t)output_w < (int64_t)dst->w - x
@@ -795,30 +1153,57 @@ void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
 
 void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src)
 {
+    int dw;
+    int dh;
+    int64_t scaled_height;
+
     if (!canvas_ok(dst)) return;
+    if (canvas_ok(src) && dst->px == src->px) return;
     sr_clear(dst, 0x000000u);
     if (!canvas_ok(src)) return;
-    int dw = dst->w;
-    int dh = (int)((int64_t)dw * src->h / src->w);
-    if (dh > dst->h) {
+    dw = dst->w;
+    scaled_height = (int64_t)dw * src->h / src->w;
+    if (scaled_height > dst->h) {
         dh = dst->h;
         dw = (int)((int64_t)dh * src->w / src->h);
+    } else {
+        dh = (int)scaled_height;
     }
     if (dw <= 0 || dh <= 0) return;
     int off_x = (dst->w - dw) / 2;
     int off_y = (dst->h - dh) / 2;
+    int sy = 0;
+    int64_t y_error = 0;
+    const int sy_step = src->h / dh;
+    const int64_t sy_remainder = src->h % dh;
+    const int sx_step = src->w / dw;
+    const int64_t sx_remainder = src->w % dw;
     for (int y = 0; y < dh; y++) {
-        int sy = (int)((int64_t)y * src->h / dh);
+        int sx = 0;
+        int64_t x_error = 0;
         for (int x = 0; x < dw; x++) {
-            int sx = (int)((int64_t)x * src->w / dw);
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
             dst->px[(size_t)(off_y + y) * (size_t)dst->w +
                     (size_t)(off_x + x)] = 0xff000000u | (s & 0x00ffffffu);
+            sx += sx_step;
+            x_error += sx_remainder;
+            if (x_error >= dw) {
+                ++sx;
+                x_error -= dw;
+            }
+        }
+        sy += sy_step;
+        y_error += sy_remainder;
+        if (y_error >= dh) {
+            ++sy;
+            y_error -= dh;
         }
     }
 }
 
 /* ------------------------------------------------------------------- ppm */
+
+#define PPM_CHUNK_PIXELS 4096u
 
 static bool ppm_token(FILE *file, char *buffer, size_t capacity)
 {
@@ -857,31 +1242,57 @@ bool sr_load_ppm(sr_canvas *c, const char *path)
 {
     FILE *file = NULL;
     char token[64];
+    unsigned char bytes[PPM_CHUNK_PIXELS * 3u];
     int width, height, maxval;
+    int failure = 0;
     sr_canvas loaded = {0};
     bool ok = false;
 
-    if (c == NULL) return false;
-    c->px = NULL;
-    c->w = 0;
-    c->h = 0;
-    c->owns_px = false;
-    if (path == NULL || (file = fopen(path, "rb")) == NULL) return false;
+    if (c == NULL || path == NULL) {
+        errno = EINVAL;
+        return false;
+    }
+    *c = (sr_canvas){0};
+    file = fopen(path, "rb");
+    if (file == NULL) return false;
+    errno = 0;
     if (!ppm_token(file, token, sizeof token) || strcmp(token, "P6") != 0 ||
         !ppm_token(file, token, sizeof token) ||
         !parse_positive_int(token, &width) ||
         !ppm_token(file, token, sizeof token) ||
         !parse_positive_int(token, &height) ||
         !ppm_token(file, token, sizeof token) ||
-        !parse_positive_int(token, &maxval) || maxval != 255 ||
-        !sr_canvas_init(&loaded, width, height))
+        !parse_positive_int(token, &maxval) || maxval != 255) {
+        failure = EINVAL;
         goto done;
+    }
+    if (!dimensions_ok(width, height, NULL)) {
+        failure = EOVERFLOW;
+        goto done;
+    }
+    errno = 0;
+    if (!sr_canvas_init(&loaded, width, height)) {
+        failure = errno != 0 ? errno : ENOMEM;
+        goto done;
+    }
 
     size_t pixels = (size_t)width * (size_t)height;
-    for (size_t i = 0u; i < pixels; i++) {
-        unsigned char bytes[3];
-        if (fread(bytes, 1u, sizeof bytes, file) != sizeof bytes) goto done;
-        loaded.px[i] = 0xff000000u | sr_rgb(bytes[0], bytes[1], bytes[2]);
+    for (size_t offset = 0u; offset < pixels;) {
+        const size_t remaining = pixels - offset;
+        const size_t chunk = remaining < PPM_CHUNK_PIXELS
+            ? remaining : PPM_CHUNK_PIXELS;
+
+        if (fread(bytes, 3u, chunk, file) != chunk) {
+            failure = ferror(file) && errno != 0 ? errno :
+                      ferror(file) ? EIO : EINVAL;
+            goto done;
+        }
+        for (size_t index = 0u; index < chunk; ++index) {
+            loaded.px[offset + index] = UINT32_C(0xff000000) |
+                sr_rgb(bytes[index * 3u], bytes[index * 3u + 1u],
+                       bytes[index * 3u + 2u]);
+        }
+        offset += chunk;
     }
     *c = loaded;
     loaded = (sr_canvas){0};
@@ -891,29 +1302,51 @@ done:
     sr_canvas_free(&loaded);
     if (fclose(file) != 0) {
         if (ok) sr_canvas_free(c);
+        if (failure == 0) failure = errno != 0 ? errno : EIO;
         ok = false;
     }
+    errno = ok ? 0 : failure != 0 ? failure : EIO;
     return ok;
 }
 
 bool sr_write_ppm(const sr_canvas *c, const char *path)
 {
-    if (!canvas_ok(c) || path == NULL) return false;
+    unsigned char bytes[PPM_CHUNK_PIXELS * 3u];
+    int failure = 0;
+    bool ok = true;
+
+    if (!canvas_ok(c) || path == NULL) {
+        errno = EINVAL;
+        return false;
+    }
     FILE *file = fopen(path, "wb");
     if (file == NULL) return false;
-    (void)fprintf(file, "P6\n%d %d\n255\n", c->w, c->h);
-    size_t n = (size_t)c->w * (size_t)c->h;
-    for (size_t i = 0; i < n; i++) {
-        uint32_t p = c->px[i];
-        unsigned char bytes[3] = {
-            (unsigned char)((p >> 16) & 255u),
-            (unsigned char)((p >> 8) & 255u),
-            (unsigned char)(p & 255u)
-        };
-        (void)fwrite(bytes, 1, sizeof bytes, file);
-    }
-    bool ok = !ferror(file);
-    if (fclose(file) != 0)
+    errno = 0;
+    if (fprintf(file, "P6\n%d %d\n255\n", c->w, c->h) < 0) {
+        failure = errno != 0 ? errno : EIO;
         ok = false;
+    }
+    size_t n = (size_t)c->w * (size_t)c->h;
+    for (size_t offset = 0u; ok && offset < n;) {
+        const size_t remaining = n - offset;
+        const size_t chunk = remaining < PPM_CHUNK_PIXELS
+            ? remaining : PPM_CHUNK_PIXELS;
+
+        pack_rgb_pixels(c->px + offset, bytes, chunk);
+        if (fwrite(bytes, 3u, chunk, file) != chunk) {
+            failure = errno != 0 ? errno : EIO;
+            ok = false;
+        }
+        offset += chunk;
+    }
+    if (ferror(file)) {
+        if (failure == 0) failure = errno != 0 ? errno : EIO;
+        ok = false;
+    }
+    if (fclose(file) != 0) {
+        if (failure == 0) failure = errno != 0 ? errno : EIO;
+        ok = false;
+    }
+    errno = ok ? 0 : failure != 0 ? failure : EIO;
     return ok;
 }

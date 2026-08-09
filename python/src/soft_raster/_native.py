@@ -73,19 +73,28 @@ def _auto_candidates() -> list[str]:
 
 
 class SoftRasterLibrary:
-    """A loaded soft-raster shared library with a declared 0.3 ABI.
+    """A loaded soft-raster library with the required 0.3 API.
 
     ``path`` can be an absolute path or a dynamic-loader name. When omitted,
     the loader checks ``SOFT_RASTER_LIBRARY``, a bundled ``_libs`` directory,
     the conventional sibling source checkout, and finally the system loader.
+    Additive 0.4 RGB-packing and selectable-font APIs are feature-detected.
     """
 
     abi_version = (0, 3)
 
     def __init__(self, path: str | os.PathLike[str] | None = None) -> None:
         explicit = os.fspath(path) if path is not None else None
+        if explicit is not None and not isinstance(explicit, str):
+            raise TypeError("library path must resolve to str")
         environment = os.environ.get("SOFT_RASTER_LIBRARY")
-        candidates = [explicit] if explicit else [environment] if environment else _auto_candidates()
+        candidates = (
+            [explicit]
+            if explicit
+            else [environment]
+            if environment
+            else _auto_candidates()
+        )
         errors: list[str] = []
         library: ctypes.CDLL | None = None
         loaded_from = ""
@@ -114,10 +123,21 @@ class SoftRasterLibrary:
         except AttributeError as error:
             raise IncompatibleLibraryError(
                 f"{self.path} does not export required symbol {name}; "
-                "soft-raster 0.3.x is required"
+                "soft-raster 0.3 or a compatible later API is required"
             ) from error
         function.argtypes = arguments
         function.restype = result
+
+    def _declare_optional(
+        self, name: str, arguments: list[object], result: object
+    ) -> bool:
+        try:
+            function = getattr(self.raw, name)
+        except AttributeError:
+            return False
+        function.argtypes = arguments
+        function.restype = result
+        return True
 
     def _declare_functions(self) -> None:
         canvas = ctypes.POINTER(_Canvas)
@@ -137,6 +157,9 @@ class SoftRasterLibrary:
         self._declare("sr_canvas_reset_clip", [canvas], None)
         self._declare(
             "sr_pack_rgba", [canvas, bytes_pointer, ctypes.c_size_t], ctypes.c_bool
+        )
+        self.supports_rgb_pack = self._declare_optional(
+            "sr_pack_rgb", [canvas, bytes_pointer, ctypes.c_size_t], ctypes.c_bool
         )
 
         self._declare(
@@ -243,6 +266,24 @@ class SoftRasterLibrary:
         self._declare("sr_text_center", text_arguments, None)
         self._declare("sr_text_outlined", text_arguments, None)
         self._declare("sr_text_shadow", text_arguments, None)
+        font = ctypes.c_int
+        font_symbols = (
+            self._declare_optional("sr_font_advance", [font], integer),
+            self._declare_optional("sr_font_height", [font], integer),
+            self._declare_optional(
+                "sr_font_glyph_in",
+                [font, ctypes.c_ubyte],
+                ctypes.POINTER(ctypes.c_uint8),
+            ),
+            self._declare_optional(
+                "sr_text_width_in", [font, ctypes.c_char_p, integer], integer
+            ),
+            self._declare_optional("sr_text_in", [font, *text_arguments], None),
+            self._declare_optional(
+                "sr_text_center_in", [font, *text_arguments], None
+            ),
+        )
+        self.supports_selectable_fonts = all(font_symbols)
 
         self._declare("sr_blit", [canvas, canvas, integer, integer], None)
         self._declare(

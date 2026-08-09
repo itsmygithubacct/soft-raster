@@ -91,6 +91,16 @@ class PackingAndImageTests(unittest.TestCase):
         with self.assertRaises(BufferError):
             canvas.pack_rgba_into(bytearray(7))
 
+        rgb_output = bytearray(6)
+        self.assertEqual(canvas.pack_rgb_into(rgb_output), 6)
+        self.assertEqual(bytes(rgb_output), canvas.rgb_bytes())
+        with self.assertRaises(BufferError):
+            canvas.pack_rgb_into(bytearray(5))
+        with self.assertRaisesRegex(BufferError, "writable"):
+            canvas.pack_rgb_into(bytes(6))
+        with self.assertRaisesRegex(BufferError, "C-contiguous"):
+            canvas.pack_rgba_into(memoryview(bytearray(16))[::2])
+
     def test_native_ppm_roundtrip_and_errors(self) -> None:
         canvas = sr.Canvas(3, 2).clear(0x123456)
         canvas.pixel(2, 1, 0xABCDEF)
@@ -104,6 +114,9 @@ class PackingAndImageTests(unittest.TestCase):
 
             invalid = root / "invalid.ppm"
             invalid.write_bytes(b"not a ppm")
+            with self.assertRaises(sr.ImageFormatError):
+                sr.Canvas.from_ppm(invalid)
+            invalid.write_bytes(b"P6\n999999999999999999999 1\n255\n")
             with self.assertRaises(sr.ImageFormatError):
                 sr.Canvas.from_ppm(invalid)
             with self.assertRaises(FileNotFoundError):

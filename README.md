@@ -1,7 +1,7 @@
 # soft-raster
 
 `soft-raster` is a small C11 software rasterizer for 32-bit framebuffers:
-anti-aliased primitives, an embedded 8x16 bitmap font, sprite blits with
+anti-aliased primitives, two embedded bitmap fonts, sprite blits with
 per-pixel alpha, P6 PPM loading, and an aspect-preserving letterbox scaler.
 
 The code was extracted from the software renderer shared by the
@@ -11,9 +11,10 @@ duplicated at the top of every game's renderer. The blending math is kept
 identical, so frames drawn through this library match the original games
 byte for byte on an opaque canvas.
 
-The library is pure ISO C11 with no operating-system dependencies. The only
-allocation happens when a canvas is created; every drawing call is fully
-clipped to the canvas bounds.
+The library is pure ISO C11 with no operating-system dependencies. Drawing is
+fully clipped to the active canvas clip. Canvas creation allocates its pixel
+buffer, and polygons above 64 vertices allocate a temporary crossing array;
+ordinary drawing uses only canvas and stack memory.
 
 ## Build and test
 
@@ -21,6 +22,7 @@ clipped to the canvas bounds.
 make
 make test
 make sanitize
+make benchmark
 ./build/demo
 ```
 
@@ -37,6 +39,7 @@ the same shared library without bundling a second native implementation:
 ```sh
 make python-check
 make python-wheel
+make python-benchmark
 ```
 
 The wheel is written below `python/dist/`.
@@ -98,8 +101,9 @@ non-positive dimensions and pixel counts that would overflow.
 `sr_canvas_free()` releases memory obtained from `sr_canvas_init()` and
 never frees wrapped memory. `sr_canvas_set_clip()` limits subsequent pixel and
 primitive drawing to a rectangle; `sr_canvas_reset_clip()` restores the full
-canvas. `sr_pack_rgba()` converts the native canvas into presenter-friendly
-R,G,B,A byte order.
+canvas. Initialize or wrap only an empty canvas, and free it before reusing the
+struct. `sr_pack_rgba()` and `sr_pack_rgb()` convert native pixels into
+presenter-friendly channel order.
 
 ## Drawing
 
@@ -122,12 +126,12 @@ between pixel centers receive fractional-coverage anti-aliasing.
 
 ## Text
 
-`sr_text`, `sr_text_center`, `sr_text_outlined`, and `sr_text_shadow` draw
-with the embedded 8x16 console font at an integer scale factor (clamped to
-at least 1). Characters outside ASCII 32..126 render as `?`.
-`sr_text_width()` returns a string's advance width in pixels. Renderers that
-need custom scaling can read the same embedded bitmap through
-`sr_font_glyph()` instead of carrying another font-table copy.
+`sr_text`, `sr_text_center`, `sr_text_outlined`, and `sr_text_shadow` retain
+the original fixed 8x16 console font at an integer scale factor (clamped to at
+least 1). The `sr_*_in()` variants select either that face or the compact 7x14
+face per call. Characters outside ASCII 32..126 render as `?`. Font metrics,
+string widths, and bitmap rows are available through `sr_font_advance()`,
+`sr_font_height()`, `sr_text_width_in()`, and `sr_font_glyph_in()`.
 
 ## Blits and scaling
 
@@ -145,6 +149,10 @@ need custom scaling can read the same embedded bitmap through
 - `sr_scale_canvas` — scales the whole source onto the destination with
   nearest-neighbor sampling, preserving aspect ratio, centered, with
   opaque black letterbox bars.
+
+The unscaled `sr_blit`, `sr_blit_alpha`, and `sr_blit_tint` calls support
+overlap within the same canvas. Scaled, transformed, and letterbox operations
+require non-overlapping source and destination storage.
 
 ## PPM images
 
@@ -172,8 +180,8 @@ The build produces static and shared libraries. Applications may instead
 compile `src/soft_raster.c` directly. The library depends only on the C
 standard library and `libm`; nothing in it requires POSIX.
 
-The API is pre-1.0 and may change between minor releases. Version 0.3.0 adds
-the transformed whole-canvas blit API without changing existing calls.
+The API is pre-1.0 and may change between minor releases. Version 0.4.0 adds
+direct RGB packing and selectable font APIs without changing existing calls.
 
 ## License
 

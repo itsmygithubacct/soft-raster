@@ -1,5 +1,7 @@
 #include "soft_raster.h"
 
+#include <errno.h>
+#include <float.h>
 #include <limits.h>
 #include <math.h>
 #include <stdbool.h>
@@ -71,6 +73,11 @@ test_wrap_does_not_free_caller_memory(void)
     CHECK(c.px == NULL);
     CHECK(mem[0] == 0xff123456u);  /* caller memory intact after free */
     CHECK(mem[15] == 0xdeadbeefu);
+
+    sr_canvas_wrap(&c, mem, INT_MAX, INT_MAX);
+    CHECK(c.px == NULL && c.w == 0 && c.h == 0 && !c.owns_px);
+    CHECK(c.clip_x0 == 0 && c.clip_y0 == 0 &&
+          c.clip_x1 == 0 && c.clip_y1 == 0);
     return true;
 }
 
@@ -79,6 +86,7 @@ test_clip_and_rgba_pack(void)
 {
     sr_canvas c;
     uint8_t rgba[4u * 4u * 4u] = {0};
+    uint8_t rgb[4u * 4u * 3u] = {0};
 
     CHECK(sr_canvas_init(&c, 4, 4));
     sr_clear(&c, 0x102030u);
@@ -93,6 +101,47 @@ test_clip_and_rgba_pack(void)
     CHECK(sr_pack_rgba(&c, rgba, sizeof rgba));
     CHECK(rgba[0] == 1u && rgba[1] == 2u && rgba[2] == 3u && rgba[3] == 255u);
     CHECK(!sr_pack_rgba(&c, rgba, sizeof rgba - 1u));
+    CHECK(sr_pack_rgb(&c, rgb, sizeof rgb));
+    CHECK(rgb[0] == 1u && rgb[1] == 2u && rgb[2] == 3u);
+    CHECK(rgb[3] == 0x10u && rgb[4] == 0x20u && rgb[5] == 0x30u);
+    CHECK(!sr_pack_rgb(&c, rgb, sizeof rgb - 1u));
+    sr_canvas_free(&c);
+    return true;
+}
+
+static bool
+test_nonfinite_overflow_and_degenerate_inputs(void)
+{
+    sr_canvas c;
+    const float invalid_xs[3] = {0.0f, INFINITY, 1.0f};
+    const float valid_ys[3] = {0.0f, 1.0f, 1.0f};
+
+    CHECK(sr_mix(0x123456u, 0xffffffu, NAN) == 0x123456u);
+    CHECK(sr_scale_rgb(0xffffffu, NAN) == 0u);
+    CHECK(sr_text_width("A", INT_MAX) == INT_MAX);
+    CHECK(sr_text_width_in(SR_FONT_FIXED_8X16, "A", INT_MAX) == INT_MAX);
+
+    CHECK(sr_canvas_init(&c, 8, 8));
+    sr_clear(&c, 0x010203u);
+    sr_blend(&c, 0, 0, 0xffffffu, NAN);
+    sr_fill_rect(&c, INFINITY, 0.0f, 1.0f, 1.0f,
+                 0xffffffu, 1.0f);
+    sr_fill_circle(&c, 4.0f, 4.0f, NAN, 0xffffffu, 1.0f);
+    sr_fill_ellipse(&c, 4.0f, 4.0f, INFINITY, 2.0f,
+                    0xffffffu, 1.0f);
+    sr_ring(&c, 4.0f, 4.0f, 2.0f, NAN, 0xffffffu, 1.0f);
+    sr_text(&c, NAN, 0.0f, "A", 0xffffffu, 1.0f, 1);
+    sr_fill_triangle(&c, 1.0f, 1.0f, 2.0f, 2.0f, 3.0f, 3.0f,
+                     0xffffffu, 1.0f);
+    sr_fill_polygon(&c, invalid_xs, valid_ys, 3u, 0xffffffu, 1.0f);
+    sr_fill_polygon(&c, invalid_xs, valid_ys,
+                    SIZE_MAX / sizeof(double) + 1u, 0xffffffu, 1.0f);
+    sr_text(&c, -INFINITY, 0.0f, "invisible", 0xffffffu, 1.0f, 1);
+    sr_text(&c, -FLT_MAX, 0.0f, "invisible", 0xffffffu, 1.0f, 1);
+    sr_line(&c, 0.0f, 0.0f, 1.0f, 1.0f, 1.0f, 0x010203u, 1.0f,
+            INT_MAX, INT_MAX);
+    CHECK(px_at(&c, 0, 0) == 0xff010203u);
+    CHECK(px_at(&c, 4, 4) == 0xff010203u);
     sr_canvas_free(&c);
     return true;
 }
@@ -657,6 +706,67 @@ test_blit_clipping_all_edges(void)
 }
 
 static bool
+test_overlapping_blit(void)
+{
+    sr_canvas c;
+    sr_canvas expected;
+    sr_canvas source;
+
+    CHECK(sr_canvas_init(&c, 4, 3));
+    CHECK(sr_canvas_init(&expected, 4, 3));
+    CHECK(sr_canvas_init(&source, 4, 3));
+    for (int y = 0; y < c.h; ++y)
+        for (int x = 0; x < c.w; ++x)
+            sr_px(&c, x, y, (uint32_t)(1 + x + y * c.w));
+
+    sr_blit(&c, &c, 1, 0);
+    CHECK(px_at(&c, 0, 0) == 0xff000001u);
+    CHECK(px_at(&c, 1, 0) == 0xff000001u);
+    CHECK(px_at(&c, 2, 0) == 0xff000002u);
+    CHECK(px_at(&c, 3, 0) == 0xff000003u);
+
+    for (int y = 0; y < c.h; ++y)
+        for (int x = 0; x < c.w; ++x)
+            sr_px(&c, x, y, (uint32_t)(1 + x + y * c.w));
+    sr_blit(&c, &c, 0, 1);
+    CHECK(px_at(&c, 0, 1) == 0xff000001u);
+    CHECK(px_at(&c, 3, 1) == 0xff000004u);
+    CHECK(px_at(&c, 0, 2) == 0xff000005u);
+    CHECK(px_at(&c, 3, 2) == 0xff000008u);
+
+    for (int y = 0; y < c.h; ++y)
+        for (int x = 0; x < c.w; ++x)
+            sr_px(&c, x, y, (uint32_t)(1 + x + y * c.w));
+    sr_blit_alpha(&c, &c, 1, 0, 1.0f);
+    CHECK(px_at(&c, 1, 0) == 0xff000001u);
+    CHECK(px_at(&c, 3, 0) == 0xff000003u);
+
+    for (int y = 0; y < c.h; ++y) {
+        for (int x = 0; x < c.w; ++x) {
+            const uint32_t value = UINT32_C(0x40102030) +
+                                   (uint32_t)(x + y * c.w);
+            c.px[(size_t)y * (size_t)c.w + (size_t)x] = value;
+            expected.px[(size_t)y * (size_t)c.w + (size_t)x] = value;
+            source.px[(size_t)y * (size_t)c.w + (size_t)x] = value;
+        }
+    }
+    sr_blit_alpha(&expected, &source, 1, 1, 0.5f);
+    sr_blit_alpha(&c, &c, 1, 1, 0.5f);
+    CHECK(memcmp(c.px, expected.px, 12u * sizeof(uint32_t)) == 0);
+
+    memcpy(c.px, source.px, 12u * sizeof(uint32_t));
+    memcpy(expected.px, source.px, 12u * sizeof(uint32_t));
+    sr_blit_tint(&expected, &source, -1, -1, 0xabcdefu, 0.75f);
+    sr_blit_tint(&c, &c, -1, -1, 0xabcdefu, 0.75f);
+    CHECK(memcmp(c.px, expected.px, 12u * sizeof(uint32_t)) == 0);
+
+    sr_canvas_free(&source);
+    sr_canvas_free(&expected);
+    sr_canvas_free(&c);
+    return true;
+}
+
+static bool
 test_blit_alpha_and_tint(void)
 {
     sr_canvas dst, spr;
@@ -994,6 +1104,7 @@ static bool
 test_ppm_round_trip(void)
 {
     const char *path = "build/test-roundtrip.ppm";
+    const char *invalid_path = "build/test-invalid.ppm";
     sr_canvas c;
     FILE *file;
     char magic[3] = {0};
@@ -1027,7 +1138,9 @@ test_ppm_round_trip(void)
     CHECK(bytes[12] == 0xff && bytes[13] == 0xff && bytes[14] == 0xff);
     CHECK(bytes[15] == 0x00 && bytes[16] == 0x00 && bytes[17] == 0x00);
 
+    errno = 0;
     CHECK(!sr_write_ppm(NULL, path));
+    CHECK(errno == EINVAL);
 
     sr_canvas loaded;
     CHECK(sr_load_ppm(&loaded, path));
@@ -1035,8 +1148,20 @@ test_ppm_round_trip(void)
     CHECK(px_at(&loaded, 0, 0) == 0xff102030u);
     CHECK(px_at(&loaded, 2, 1) == 0xff000000u);
     sr_canvas_free(&loaded);
+    file = fopen(invalid_path, "wb");
+    CHECK(file != NULL);
+    CHECK(fputs("P6\n999999999999999999999 1\n255\n", file) >= 0);
+    CHECK(fclose(file) == 0);
+    errno = 0;
+    CHECK(!sr_load_ppm(&loaded, invalid_path));
+    CHECK(errno == EINVAL);
+    CHECK(remove(invalid_path) == 0);
+    errno = 0;
     CHECK(!sr_load_ppm(&loaded, "build/does-not-exist.ppm"));
+    CHECK(errno == ENOENT);
     CHECK(loaded.px == NULL && loaded.w == 0 && loaded.h == 0);
+    CHECK(loaded.clip_x0 == 0 && loaded.clip_y0 == 0 &&
+          loaded.clip_x1 == 0 && loaded.clip_y1 == 0);
     return true;
 }
 
@@ -1054,6 +1179,8 @@ main(void)
         {"canvas lifecycle and overflow guard", test_canvas_lifecycle_and_overflow},
         {"wrap does not free caller memory", test_wrap_does_not_free_caller_memory},
         {"clip and RGBA pack", test_clip_and_rgba_pack},
+        {"nonfinite, overflow, and degenerate inputs",
+         test_nonfinite_overflow_and_degenerate_inputs},
         {"clipped pixel stores", test_clipped_pixel_stores},
         {"blend math", test_blend_math},
         {"color helpers", test_color_helpers},
@@ -1075,6 +1202,7 @@ main(void)
         {"text metrics and glyph bits", test_text_metrics_and_glyph_bits},
         {"text outline and shadow", test_text_outline_and_shadow},
         {"blit clipping at all edges", test_blit_clipping_all_edges},
+        {"overlapping blit", test_overlapping_blit},
         {"blit alpha and tint", test_blit_alpha_and_tint},
         {"scaled blit dimensions", test_blit_scaled_dimensions},
         {"transformed blit combinations", test_blit_transformed_all_combinations},

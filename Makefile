@@ -6,6 +6,7 @@ DESTDIR ?=
 CC ?= cc
 AR ?= ar
 INSTALL ?= install
+PYTHON ?= python3
 
 CPPFLAGS += -Iinclude
 WARNINGS := \
@@ -20,15 +21,18 @@ STATIC_LIB := $(BUILD_DIR)/lib$(PROJECT).a
 SHARED_LIB := $(BUILD_DIR)/lib$(PROJECT).so
 TEST_BIN := $(BUILD_DIR)/test-raster
 EXAMPLE_BIN := $(BUILD_DIR)/demo
+BENCH_BIN := $(BUILD_DIR)/bench-raster
 
-.PHONY: all clean install python-check python-wheel sanitize test
+.PHONY: all benchmark clean install python-benchmark python-check \
+	python-wheel sanitize test
 
 all: $(STATIC_LIB) $(SHARED_LIB) $(EXAMPLE_BIN)
 
 $(BUILD_DIR):
 	mkdir -p $@
 
-$(BUILD_DIR)/soft_raster.o: src/soft_raster.c include/soft_raster.h src/font8x16.h | $(BUILD_DIR)
+$(BUILD_DIR)/soft_raster.o: src/soft_raster.c include/soft_raster.h \
+		src/font8x16.h src/font7x14.h | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $< -o $@
 
 $(STATIC_LIB): $(LIB_OBJS)
@@ -43,8 +47,18 @@ $(TEST_BIN): tests/test_raster.c $(STATIC_LIB) | $(BUILD_DIR)
 $(EXAMPLE_BIN): examples/demo.c $(STATIC_LIB) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
+$(BENCH_BIN): benchmarks/bench_raster.c $(STATIC_LIB) | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
 test: $(TEST_BIN)
 	$(TEST_BIN)
+
+benchmark: $(BENCH_BIN)
+	$(BENCH_BIN)
+
+python-benchmark: all
+	PYTHONPATH=python/src SOFT_RASTER_LIBRARY=$(abspath $(SHARED_LIB)) \
+		$(PYTHON) benchmarks/bench_python.py
 
 sanitize: | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) -std=c11 -O1 -g3 $(WARNINGS) \

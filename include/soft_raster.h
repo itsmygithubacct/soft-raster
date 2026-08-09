@@ -3,13 +3,14 @@
 
 /*
  * A small software rasterizer for 32-bit framebuffers: anti-aliased
- * primitives, an embedded 8x16 bitmap font, sprite blits, and a letterbox
+ * primitives, two embedded bitmap fonts, sprite blits, and a letterbox
  * scaler.  Extracted from the software renderer shared by the
  * terminal-lander family of terminal games.
  *
- * The library is pure ISO C11 with no operating-system dependencies.  The
- * only allocation happens in sr_canvas_init(); every other call draws into
- * memory the canvas already owns, fully clipped to the canvas bounds.
+ * The library is pure ISO C11 with no operating-system dependencies.
+ * Drawing uses memory the canvas already owns and is fully clipped to the
+ * canvas bounds.  sr_fill_polygon() uses a small stack workspace for ordinary
+ * outlines and may allocate crossings for more than 64 vertices.
  *
  * Pixel format
  * ------------
@@ -26,8 +27,9 @@
  * - On a canvas that starts fully transparent (sr_canvas_init() zeroes the
  *   pixels), drawing therefore builds a premultiplied-alpha sprite: RGB
  *   carries color scaled by coverage and the high byte carries coverage.
- *   sr_blit_alpha(), sr_blit_tint(), and sr_blit_transformed() composite
- *   such sprites over another canvas using that per-pixel alpha.
+ *   sr_blit_alpha(), sr_blit_tint(), sr_blit_scaled(), and
+ *   sr_blit_transformed() composite such sprites over another canvas using
+ *   that per-pixel alpha.
  */
 
 #include <stdbool.h>
@@ -39,7 +41,7 @@ extern "C" {
 #endif
 
 #define SR_VERSION_MAJOR 0
-#define SR_VERSION_MINOR 3
+#define SR_VERSION_MINOR 4
 #define SR_VERSION_PATCH 0
 
 /* Embedded font glyph cell, before scaling. */
@@ -78,9 +80,11 @@ enum {
  * count a size_t, or when allocation fails.
  *
  * sr_canvas_wrap() points the canvas at caller-owned memory of at least
- * w*h pixels without copying or clearing.  sr_canvas_free() releases memory
- * obtained by sr_canvas_init() and never frees wrapped memory; either way
- * it resets *c to an empty canvas.
+ * w*h pixels without copying or clearing. Invalid dimensions leave an empty
+ * canvas. sr_canvas_free() releases memory obtained by sr_canvas_init() and
+ * never frees wrapped memory; either way it resets *c to an empty canvas.
+ * Initialize or wrap only an empty/uninitialized canvas; free a live canvas
+ * before reusing the struct, because replacing it does not release old pixels.
  */
 bool sr_canvas_init(sr_canvas *c, int w, int h);
 void sr_canvas_wrap(sr_canvas *c, uint32_t *mem, int w, int h);
@@ -88,11 +92,14 @@ void sr_canvas_free(sr_canvas *c);
 void sr_canvas_set_clip(sr_canvas *c, int x, int y, int w, int h);
 void sr_canvas_reset_clip(sr_canvas *c);
 
-/* Convert the canvas into R,G,B,A byte order for presentation APIs. */
+/* Convert the canvas into portable channel order for presentation APIs.
+ * byte_count must cover w*h*4 or w*h*3 bytes respectively, and the output
+ * must not overlap the canvas pixel storage. */
 bool sr_pack_rgba(const sr_canvas *c, uint8_t *rgba, size_t byte_count);
+bool sr_pack_rgb(const sr_canvas *c, uint8_t *rgb, size_t byte_count);
 
 /* Color helpers: pack channels, linear mix by t in [0,1], multiply by k in
- * [0,2] with per-channel saturation. */
+ * [0,2] with per-channel saturation. NaN factors clamp to the lower bound. */
 uint32_t sr_rgb(uint8_t r, uint8_t g, uint8_t b);
 uint32_t sr_mix(uint32_t a, uint32_t b, float t);
 uint32_t sr_scale_rgb(uint32_t rgb, float k);
@@ -120,7 +127,8 @@ void sr_blend(sr_canvas *c, int x, int y, uint32_t rgb, float alpha);
  * - sr_fill_triangle: filled triangle via edge functions (either winding).
  *
  * sr_fill_triangle, sr_fill_convex and sr_fill_polygon sample the pixel
- * center rather than computing coverage, so their edges are hard.
+ * center rather than computing coverage, so their edges are hard. Non-finite
+ * geometry is rejected as a no-op.
  */
 void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
                   uint32_t rgb, float alpha);
@@ -178,7 +186,8 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
 /*
  * Text over the embedded 8x16 font (ASCII 32..126; anything else renders
  * as '?').  scale is an integer pixel multiplier and is clamped to >= 1.
- * sr_text_width() returns the advance width of the string in pixels.
+ * sr_text_width() returns the advance width of the string in pixels,
+ * saturating at INT_MAX when it cannot be represented.
  * sr_text_outlined() draws a 1px black outline; sr_text_shadow() draws a
  * black drop shadow offset by one scaled pixel at 75% of alpha.
  */
@@ -246,6 +255,10 @@ void sr_text_shadow(sr_canvas *c, float x, float y, const char *s,
  * - sr_scale_canvas: scales the whole source onto the destination with
  *   nearest-neighbor sampling, preserving aspect ratio, centered, with
  *   opaque black letterbox bars; output alpha is forced opaque.
+ *
+ * Source and destination storage must not overlap for scaled, transformed,
+ * or letterbox blits. The three unscaled blits support overlap within the
+ * same canvas.
  */
 void sr_blit(sr_canvas *dst, const sr_canvas *src, int x, int y);
 void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,
@@ -260,12 +273,14 @@ void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
 void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src);
 
 /* Loads a binary P6 PPM into a newly allocated canvas.  Comments and arbitrary
- * header whitespace are accepted; maxval must be 255.  *c is reset on entry
- * and owns its pixels on success. */
+ * header whitespace are accepted; maxval must be 255.  *c must be empty or
+ * uninitialized, is reset on entry, and owns its pixels on success. Failures
+ * set errno: EINVAL for malformed/truncated input, EOVERFLOW for unsupported
+ * dimensions, or the allocation/filesystem error. */
 bool sr_load_ppm(sr_canvas *c, const char *path);
 
-/* Writes the canvas as a binary P6 PPM (alpha dropped).  Returns false on an
- * empty canvas or any I/O failure. */
+/* Writes the canvas as a binary P6 PPM (alpha dropped).  Returns false and
+ * sets errno on an empty canvas, invalid path, or any I/O failure. */
 bool sr_write_ppm(const sr_canvas *c, const char *path);
 
 #ifdef __cplusplus

@@ -4,6 +4,15 @@
 
 - Add `Canvas.fill_polygon()`, binding `sr_fill_polygon()` for concave
   outlines.
+- Feature-detect the additive native 0.4 API. Use direct `sr_pack_rgb()` for
+  `rgb_bytes()`, `pack_rgb_into()`, and `ppm_bytes()` when available while
+  retaining the compatible 0.3 RGBA conversion path.
+- Add `Font`, selectable-font text drawing, font-aware string metrics, glyph
+  access, and face dimensions for the fixed 8x16 and compact 7x14 fonts. The
+  fixed face remains available with a 0.3 library; compact selection reports
+  an actionable compatibility error when the additive symbols are absent.
+- Consolidate packed-output buffer validation and reject non-text filesystem
+  paths before native-library discovery.
 
 ## 0.1.0 - 2026-07-22
 
