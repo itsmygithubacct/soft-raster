@@ -113,7 +113,75 @@ static bool benchmark_fill(sr_canvas *frame)
         sr_fill_rect(frame, 0.0f, 0.0f, (float)FRAME_W, (float)FRAME_H,
                      UINT32_C(0xf59e0b), 0.25f);
     sr_canvas_reset_clip(frame);
-    return report_pixels("fill_rect_clipped", 128u * 128u, 120u, started,
+    if (!report_pixels("fill_rect_clipped", 128u * 128u, 120u, started,
+                       canvas_checksum(frame))) return false;
+
+    started = monotonic_seconds();
+    if (started < 0.0) return false;
+    for (size_t iteration = 0u; iteration < 40u; ++iteration)
+        sr_fill_rect(frame, 0.25f, 0.25f, (float)FRAME_W - 0.5f,
+                     (float)FRAME_H - 0.5f, UINT32_C(0x0f172a), 1.0f);
+    return report_pixels("fill_rect_opaque", FRAME_PIXELS, 40u, started,
+                         canvas_checksum(frame));
+}
+
+static bool benchmark_line(sr_canvas *frame)
+{
+    const size_t iterations = 24u;
+    const double started = monotonic_seconds();
+
+    if (started < 0.0) return false;
+    for (size_t iteration = 0u; iteration < iterations; ++iteration)
+        sr_line(frame, 0.0f, 0.0f, (float)(FRAME_W - 1),
+                (float)(FRAME_H - 1), 2.0f, UINT32_C(0x34d399), 0.6f, 0, 0);
+    return report_pixels("line_diag_bbox", FRAME_PIXELS, iterations, started,
+                         canvas_checksum(frame));
+}
+
+static bool benchmark_ring(sr_canvas *frame)
+{
+    const size_t iterations = 80u;
+    const size_t bbox_side = 604u;  /* 2 * (r + width / 2 + 1) */
+    const double started = monotonic_seconds();
+
+    if (started < 0.0) return false;
+    for (size_t iteration = 0u; iteration < iterations; ++iteration)
+        sr_ring(frame, (float)FRAME_W / 2.0f, (float)FRAME_H / 2.0f,
+                300.0f, 2.0f, UINT32_C(0xf472b6), 0.8f);
+    return report_pixels("ring_bbox", bbox_side * bbox_side, iterations,
+                         started, canvas_checksum(frame));
+}
+
+static bool benchmark_ellipse(sr_canvas *frame)
+{
+    const size_t iterations = 24u;
+    const size_t bbox = 1202u * 602u;  /* (2 rx + 2) * (2 ry + 2) */
+    const double started = monotonic_seconds();
+
+    if (started < 0.0) return false;
+    for (size_t iteration = 0u; iteration < iterations; ++iteration)
+        sr_fill_ellipse(frame, (float)FRAME_W / 2.0f, (float)FRAME_H / 2.0f,
+                        600.0f, 300.0f, UINT32_C(0xfbbf24), 0.25f);
+    return report_pixels("fill_ellipse_bbox", bbox, iterations, started,
+                         canvas_checksum(frame));
+}
+
+static bool benchmark_text(sr_canvas *frame)
+{
+    char text[159];
+    const size_t iterations = 12u;
+    double started;
+
+    for (size_t index = 0u; index < sizeof text - 1u; ++index)
+        text[index] = (char)(' ' + 1 + (int)(index % 94u));
+    text[sizeof text - 1u] = '\0';
+    started = monotonic_seconds();
+    if (started < 0.0) return false;
+    for (size_t iteration = 0u; iteration < iterations; ++iteration)
+        for (int row = 0; row < FRAME_H / 16; ++row)
+            sr_text(frame, 0.0f, (float)(row * 16), text,
+                    UINT32_C(0xe2e8f0), 0.9f, 1);
+    return report_pixels("text_screen", FRAME_PIXELS, iterations, started,
                          canvas_checksum(frame));
 }
 
@@ -209,7 +277,9 @@ int main(void)
     sr_fill_circle(&sprite, 160.0f, 90.0f, 88.0f,
                    UINT32_C(0x38bdf8), 0.8f);
     if (!benchmark_clear(&frame) || !benchmark_pack_rgba(&frame, rgba) ||
-        !benchmark_fill(&frame) || !benchmark_blits(&frame, &sprite) ||
+        !benchmark_fill(&frame) || !benchmark_line(&frame) ||
+        !benchmark_ring(&frame) || !benchmark_ellipse(&frame) ||
+        !benchmark_text(&frame) || !benchmark_blits(&frame, &sprite) ||
         !benchmark_polygon(&frame) || !benchmark_ppm(&frame) ||
         !benchmark_pack_rgb(&frame, rgb))
         goto cleanup_rgb;

@@ -34,6 +34,9 @@
 - Add permanent native and Python benchmark targets plus regression coverage
   for RGB packing, extreme inputs, lifecycle reset, selectable fonts, and
   overlapping copies.
+- Extend the native benchmark with diagonal line, thin ring, ellipse,
+  screenful-of-text, and opaque rectangle cases, covering the primitives
+  with the worst scaling behavior.
 
 ## 0.3.0 - 2026-07-22
 
