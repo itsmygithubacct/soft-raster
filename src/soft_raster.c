@@ -443,6 +443,22 @@ void sr_fill_ellipse(sr_canvas *c, float cx, float cy, float rx, float ry,
     }
 }
 
+/* One x-run of sr_ring's annulus: the exact per-pixel coverage test. */
+static void ring_span(sr_canvas *c, int rx0, int rx1, int y, float cx,
+                      float cy, float r, float hw, uint32_t rgb,
+                      float alpha)
+{
+    for (int x = rx0; x < rx1; x++) {
+        float dx = (float)x + 0.5f - cx;
+        float dy = (float)y + 0.5f - cy;
+        float d = sqrtf(dx * dx + dy * dy);
+        float cov = hw + 0.5f - fabsf(d - r);
+        if (cov <= 0.0f) continue;
+        blend_px_unchecked(c, x, y, rgb,
+                           alpha * (cov > 1.0f ? 1.0f : cov));
+    }
+}
+
 void sr_ring(sr_canvas *c, float cx, float cy, float r, float width,
              uint32_t rgb, float alpha)
 {
@@ -459,16 +475,53 @@ void sr_ring(sr_canvas *c, float cx, float cy, float r, float width,
     x1 = clip_hi(cx + r + hw + 1.0f, c->clip_x0, c->clip_x1);
     y0 = clip_lo(cy - r - hw - 1.0f, c->clip_y0, c->clip_y1);
     y1 = clip_hi(cy + r + hw + 1.0f, c->clip_y0, c->clip_y1);
+    /* Pixels can pass the coverage test only within the outer radius and
+     * never deep inside the hole, so each row shrinks to two runs: the
+     * outer chord minus the inner chord.  Both chords are computed in
+     * double against radii padded (outer) or shrunk (inner) by a whole
+     * pixel of distance, so every pixel the float coverage test could
+     * accept stays inside the runs; extreme coordinates, where rounding
+     * could outgrow that slack, keep the full bounding-box row. */
+    const bool narrow = fabsf(cx) <= 65536.0f && fabsf(cy) <= 65536.0f &&
+                        r + hw <= 65536.0f;
+    const double pad_out = (double)r + (double)hw + 1.5;
+    const double out2 = pad_out * pad_out;
+    const double pad_in = (double)r - (double)hw - 1.5;
+    const double in2 = pad_in > 0.0 ? pad_in * pad_in : 0.0;
     for (int y = y0; y < y1; y++) {
-        for (int x = x0; x < x1; x++) {
-            float dx = (float)x + 0.5f - cx;
-            float dy = (float)y + 0.5f - cy;
-            float d = sqrtf(dx * dx + dy * dy);
-            float cov = hw + 0.5f - fabsf(d - r);
-            if (cov <= 0.0f) continue;
-            blend_px_unchecked(c, x, y, rgb,
-                               alpha * (cov > 1.0f ? 1.0f : cov));
+        int rx0 = x0;
+        int rx1 = x1;
+        int hx0;
+        int hx1;
+
+        if (narrow) {
+            const double dy_row = (double)y + 0.5 - (double)cy;
+            const double dy2 = dy_row * dy_row;
+
+            if (dy2 >= out2) continue;
+            {
+                const double half_out = sqrt(out2 - dy2);
+                rx0 = clip_lo((double)cx - half_out - 1.0, x0, x1);
+                rx1 = clip_hi((double)cx + half_out + 1.0, x0, x1);
+            }
+            hx0 = rx1;
+            hx1 = rx1;
+            if (dy2 < in2) {
+                const double half_in = sqrt(in2 - dy2);
+
+                hx0 = clip_hi((double)cx - half_in + 0.5, rx0, rx1);
+                hx1 = clip_lo((double)cx + half_in - 0.5, rx0, rx1);
+                if (hx1 < hx0) {
+                    hx0 = rx1;
+                    hx1 = rx1;
+                }
+            }
+        } else {
+            hx0 = rx1;
+            hx1 = rx1;
         }
+        ring_span(c, rx0, hx0, y, cx, cy, r, hw, rgb, alpha);
+        ring_span(c, hx1, rx1, y, cx, cy, r, hw, rgb, alpha);
     }
 }
 

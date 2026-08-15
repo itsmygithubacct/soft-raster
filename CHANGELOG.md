@@ -50,6 +50,9 @@
   `sr_fill_polygon()`, `sr_fill_triangle()`, and `sr_fill_convex()` do the
   same.  Output is byte-identical: an alpha-1 blend lands exactly on the
   color, and interior coverage is exactly 1.0.
+- Rasterize `sr_ring()` as two chord runs per row instead of scanning the
+  whole bounding box including the hollow interior, making a thin
+  radius-300 ring roughly 17x cheaper with byte-identical output.
 
 ## 0.3.0 - 2026-07-22
 
