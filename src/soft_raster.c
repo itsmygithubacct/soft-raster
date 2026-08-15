@@ -431,8 +431,30 @@ void sr_line(sr_canvas *c, float x0, float y0, float x1, float y1,
     int y_max = clip_hi(fmaxf(y0, y1) + hw + 1.0f,
                         c->clip_y0, c->clip_y1);
     int64_t period = (int64_t)dash_on + (int64_t)dash_off;
+    /* Pixels can only pass the coverage test inside the slab where the
+     * perpendicular distance to the infinite line reaches hw + 0.5, so for
+     * non-horizontal segments each row's x range shrinks from the full
+     * bounding box to the capsule's width.  The interval is computed in
+     * double and widened by a quarter pixel of distance slack plus a whole
+     * pixel per side, keeping every pixel the float coverage test could
+     * accept inside it; extreme coordinates, where rounding could outgrow
+     * that slack, fall back to the full bounding-box row. */
+    const bool narrow = dy != 0.0f &&
+        fabsf(x0) <= 65536.0f && fabsf(y0) <= 65536.0f &&
+        fabsf(x1) <= 65536.0f && fabsf(y1) <= 65536.0f;
+    const double span_half = narrow
+        ? ((double)hw + 0.75) * (double)len / fabs((double)dy) + 1.0
+        : 0.0;
     for (int y = y_min; y < y_max; y++) {
-        for (int x = x_min; x < x_max; x++) {
+        int row_x0 = x_min;
+        int row_x1 = x_max;
+        if (narrow) {
+            const double center = (double)x0 + (double)dx *
+                ((double)y + 0.5 - (double)y0) / (double)dy;
+            row_x0 = clip_lo(center - span_half - 1.0, x_min, x_max);
+            row_x1 = clip_hi(center + span_half + 1.0, x_min, x_max);
+        }
+        for (int x = row_x0; x < row_x1; x++) {
             float px = (float)x + 0.5f - x0;
             float py = (float)y + 0.5f - y0;
             float t = clampf((px * dx + py * dy) / len2, 0.0f, 1.0f);

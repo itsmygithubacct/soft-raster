@@ -40,6 +40,9 @@
 - Make `sr_blit_scaled()` and `sr_blit_transformed()` no-ops on an aliased
   canvas, matching `sr_scale_canvas()`, instead of silently corrupting
   pixels on input the non-overlap contract already declares invalid.
+- Narrow `sr_line()` to per-row spans instead of scanning the segment's
+  whole bounding box, making a full-frame diagonal line roughly 50x
+  cheaper with byte-identical output (pinned by the new reference tests).
 
 ## 0.3.0 - 2026-07-22
 
