@@ -213,15 +213,11 @@ void sr_px(sr_canvas *c, int x, int y, uint32_t rgb)
 
 /* Core blend, shared by every primitive.  ai is coverage in [0,256]; the
  * RGB channels lerp toward the color and the alpha byte lerps toward 255
- * with the same arithmetic-shift fixed-point step the games use. */
-static void blend_px_unchecked(sr_canvas *c, int x, int y, uint32_t rgb,
-                               float a)
+ * with the same arithmetic-shift fixed-point step the games use.  At
+ * ai == 256 every channel lands exactly on the color and the alpha byte
+ * on 255, so a fully covered opaque pixel equals a plain store. */
+static void blend_px_ai(sr_canvas *c, int x, int y, uint32_t rgb, int ai)
 {
-    int ai;
-
-    if (!(a > 0.0f)) return;
-    ai = a >= 1.0f ? 256 : (int)(a * 256.0f + 0.5f);
-    if (ai <= 0) return;
     uint32_t *p = &c->px[(size_t)y * (size_t)c->w + (size_t)x];
     uint32_t d = *p;
     int dr = (int)((d >> 16) & 255u);
@@ -237,6 +233,22 @@ static void blend_px_unchecked(sr_canvas *c, int x, int y, uint32_t rgb,
     da += ((255 - da) * ai) >> 8;
     *p = ((uint32_t)da << 24) | ((uint32_t)dr << 16) |
          ((uint32_t)dg << 8) | (uint32_t)db;
+}
+
+static int coverage_ai(float a)
+{
+    return a >= 1.0f ? 256 : (int)(a * 256.0f + 0.5f);
+}
+
+static void blend_px_unchecked(sr_canvas *c, int x, int y, uint32_t rgb,
+                               float a)
+{
+    int ai;
+
+    if (!(a > 0.0f)) return;
+    ai = coverage_ai(a);
+    if (ai <= 0) return;
+    blend_px_ai(c, x, y, rgb, ai);
 }
 
 static void blend_px(sr_canvas *c, int x, int y, uint32_t rgb, float a)
@@ -274,6 +286,42 @@ static int clip_hi(double v, int lower, int upper)
 
 /* ------------------------------------------------------------ primitives */
 
+/* Fractional-coverage span of sr_fill_rect: the exact per-pixel formula. */
+static void fill_rect_span(sr_canvas *c, int px0, int px1, int py,
+                           float x, float xe, uint32_t rgb,
+                           float alpha, float cy)
+{
+    for (int px = px0; px < px1; px++) {
+        float cx = fminf((float)(px + 1), xe) - fmaxf((float)px, x);
+        if (cx <= 0.0f) continue;
+        if (cx > 1.0f) cx = 1.0f;
+        blend_px_unchecked(c, px, py, rgb, alpha * cx * cy);
+    }
+}
+
+/* Fully covered span: cx and cy are exactly 1.0f, so the blend collapses
+ * to uniform alpha and, at alpha >= 1, to a plain opaque store. */
+static void fill_interior_span(sr_canvas *c, int px0, int px1, int py,
+                               uint32_t rgb, float alpha)
+{
+    if (px0 >= px1) return;
+    if (alpha >= 1.0f) {
+        const uint32_t value = 0xff000000u | (rgb & 0x00ffffffu);
+        uint32_t *row = &c->px[(size_t)py * (size_t)c->w];
+
+        for (int px = px0; px < px1; px++)
+            row[px] = value;
+        return;
+    }
+    {
+        const int ai = coverage_ai(alpha);
+
+        if (ai <= 0) return;
+        for (int px = px0; px < px1; px++)
+            blend_px_ai(c, px, py, rgb, ai);
+    }
+}
+
 void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
                   uint32_t rgb, float alpha)
 {
@@ -281,6 +329,10 @@ void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
     int x1;
     int y0;
     int y1;
+    int ix0;
+    int ix1;
+    int iy0;
+    int iy1;
 
     if (!canvas_ok(c) || !isfinite(x) || !isfinite(y) ||
         !isfinite(w) || !isfinite(h) || w <= 0.0f || h <= 0.0f ||
@@ -289,15 +341,29 @@ void sr_fill_rect(sr_canvas *c, float x, float y, float w, float h,
     x1 = clip_hi(x + w, c->clip_x0, c->clip_x1);
     y0 = clip_lo(y, c->clip_y0, c->clip_y1);
     y1 = clip_hi(y + h, c->clip_y0, c->clip_y1);
+    /* Interior pixels -- columns and rows the rectangle covers end to
+     * end -- see min(px + 1, x + w) - max(px, x) collapse to exactly
+     * 1.0f, so they take the uniform-alpha span above while the
+     * fractional edge strips keep the exact per-pixel formula.  The 2^24
+     * cap keeps the (float) casts of pixel coordinates exact. */
+    ix0 = clip_hi((double)x, x0, x1);
+    ix1 = clip_lo((double)(x + w), x0, x1);
+    iy0 = clip_hi((double)y, y0, y1);
+    iy1 = clip_lo((double)(y + h), y0, y1);
+    if (ix1 > (1 << 24)) ix1 = 1 << 24;
+    if (iy1 > (1 << 24)) iy1 = 1 << 24;
+    if (ix0 > ix1) ix0 = ix1;
+    if (iy0 > iy1) iy0 = iy1;
     for (int py = y0; py < y1; py++) {
         float cy = fminf((float)(py + 1), y + h) - fmaxf((float)py, y);
         if (cy <= 0.0f) continue;
         if (cy > 1.0f) cy = 1.0f;
-        for (int px = x0; px < x1; px++) {
-            float cx = fminf((float)(px + 1), x + w) - fmaxf((float)px, x);
-            if (cx <= 0.0f) continue;
-            if (cx > 1.0f) cx = 1.0f;
-            blend_px_unchecked(c, px, py, rgb, alpha * cx * cy);
+        if (py >= iy0 && py < iy1 && ix0 < ix1) {
+            fill_rect_span(c, x0, ix0, py, x, x + w, rgb, alpha, cy);
+            fill_interior_span(c, ix0, ix1, py, rgb, alpha);
+            fill_rect_span(c, ix1, x1, py, x, x + w, rgb, alpha, cy);
+        } else {
+            fill_rect_span(c, x0, x1, py, x, x + w, rgb, alpha, cy);
         }
     }
 }
@@ -506,6 +572,10 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
                     c->clip_y0, c->clip_y1);
     max_y = clip_hi(fmaxf(y0, fmaxf(y1, y2)) + 1.0f,
                     c->clip_y0, c->clip_y1) - 1;
+    const bool opaque = alpha >= 1.0f;
+    const uint32_t opaque_value = 0xff000000u | (rgb & 0x00ffffffu);
+    const int ai = coverage_ai(alpha);
+    if (ai <= 0) return;
     for (int y = min_y; y <= max_y; y++) {
         for (int x = min_x; x <= max_x; x++) {
             float px = (float)x + 0.5f;
@@ -527,8 +597,15 @@ void sr_fill_triangle(sr_canvas *c, float x0, float y0, float x1, float y1,
                 neg = de0 < 0.0 || de1 < 0.0 || de2 < 0.0;
                 pos = de0 > 0.0 || de1 > 0.0 || de2 > 0.0;
             }
-            if (!(neg && pos))
-                blend_px_unchecked(c, x, y, rgb, alpha);
+            if (!(neg && pos)) {
+                /* Uniform alpha: an opaque store, or the blend with its
+                 * coverage conversion hoisted, is byte-identical. */
+                if (opaque)
+                    c->px[(size_t)y * (size_t)c->w + (size_t)x] =
+                        opaque_value;
+                else
+                    blend_px_ai(c, x, y, rgb, ai);
+            }
         }
     }
 }
@@ -550,6 +627,10 @@ void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
     int x1 = clip_hi(max_x, c->clip_x0, c->clip_x1);
     int y0 = clip_lo(min_y, c->clip_y0, c->clip_y1);
     int y1 = clip_hi(max_y, c->clip_y0, c->clip_y1);
+    const bool opaque = alpha >= 1.0f;
+    const uint32_t opaque_value = 0xff000000u | (rgb & 0x00ffffffu);
+    const int ai = coverage_ai(alpha);
+    if (ai <= 0) return;
     for (int y = y0; y < y1; y++) {
         for (int x = x0; x < x1; x++) {
             float px = (float)x + 0.5f, py = (float)y + 0.5f;
@@ -568,8 +649,13 @@ void sr_fill_convex(sr_canvas *c, const float *xs, const float *ys,
                     positive = positive || precise > 0.0;
                 }
             }
-            if (!(negative && positive))
-                blend_px_unchecked(c, x, y, rgb, alpha);
+            if (!(negative && positive)) {
+                if (opaque)
+                    c->px[(size_t)y * (size_t)c->w + (size_t)x] =
+                        opaque_value;
+                else
+                    blend_px_ai(c, x, y, rgb, ai);
+            }
         }
     }
 }
@@ -600,6 +686,11 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
     int y0 = clip_lo(min_y, c->clip_y0, c->clip_y1);
     int y1 = clip_hi(max_y, c->clip_y0, c->clip_y1);
     if (y0 >= y1) return;
+
+    const bool opaque = alpha >= 1.0f;
+    const uint32_t opaque_value = 0xff000000u | (rgb & 0x00ffffffu);
+    const int ai = coverage_ai(alpha);
+    if (ai <= 0) return;
 
     double stack_crossings[POLY_STACK_CROSSINGS];
     double *crossings = stack_crossings;
@@ -648,8 +739,15 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
                              c->clip_x0, c->clip_x1);
             int ex = clip_hi(crossings[k + 1u] - 0.5,
                              c->clip_x0, c->clip_x1);
-            for (int x = sx; x < ex; x++)
-                blend_px_unchecked(c, x, y, rgb, alpha);
+            if (opaque) {
+                uint32_t *row = &c->px[(size_t)y * (size_t)c->w];
+
+                for (int x = sx; x < ex; x++)
+                    row[x] = opaque_value;
+            } else {
+                for (int x = sx; x < ex; x++)
+                    blend_px_ai(c, x, y, rgb, ai);
+            }
         }
     }
 

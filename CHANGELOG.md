@@ -43,6 +43,13 @@
 - Narrow `sr_line()` to per-row spans instead of scanning the segment's
   whole bounding box, making a full-frame diagonal line roughly 50x
   cheaper with byte-identical output (pinned by the new reference tests).
+- Give fills the opaque fast path blits already had: fully covered
+  `sr_fill_rect()` interiors become plain stores at alpha 1 (a full-frame
+  opaque fill drops from ~16 ms to ~0.3 ms) and hoist the coverage
+  conversion otherwise, and the uniform-alpha loops of
+  `sr_fill_polygon()`, `sr_fill_triangle()`, and `sr_fill_convex()` do the
+  same.  Output is byte-identical: an alpha-1 blend lands exactly on the
+  color, and interior coverage is exactly 1.0.
 
 ## 0.3.0 - 2026-07-22
 
