@@ -879,37 +879,20 @@ static const char *skip_clipped_text(const char *s, double *x,
     return s + skip;
 }
 
+/* The fixed-face entry points delegate to the selectable-face path: the
+ * SR_FONT_FIXED_8X16 descriptor carries exactly SR_FONT_W, SR_FONT_H, and
+ * the font8x16 rows, so the drawing is byte-identical and the clipping
+ * logic lives in one place. */
 void sr_text(sr_canvas *c, float x, float y, const char *s,
              uint32_t rgb, float alpha, int scale)
 {
-    double ix;
-    double iy;
-    double advance;
-
-    if (!canvas_ok(c) || s == NULL || !isfinite(x) || !isfinite(y) ||
-        !(alpha > 0.0f)) return;
-    if (scale < 1) scale = 1;
-    ix = trunc((double)x);
-    iy = trunc((double)y);
-    advance = (double)SR_FONT_W * (double)scale;
-    if (iy >= (double)c->clip_y1 ||
-        iy + (double)SR_FONT_H * (double)scale <=
-            (double)c->clip_y0) return;
-    s = skip_clipped_text(s, &ix, advance, c->clip_x0);
-    for (; *s; s++) {
-        const unsigned char ch = (unsigned char)*s;
-        if (ix >= (double)c->clip_x1) break;
-        draw_glyph(c, ix, iy, sr_font_glyph(ch), rgb, alpha, scale,
-                   SR_FONT_H);
-        ix += advance;
-    }
+    sr_text_in(SR_FONT_FIXED_8X16, c, x, y, s, rgb, alpha, scale);
 }
 
 void sr_text_center(sr_canvas *c, float cx, float y, const char *s,
                     uint32_t rgb, float alpha, int scale)
 {
-    sr_text(c, cx - (float)sr_text_width(s, scale) / 2.0f, y, s,
-            rgb, alpha, scale);
+    sr_text_center_in(SR_FONT_FIXED_8X16, c, cx, y, s, rgb, alpha, scale);
 }
 
 void sr_text_outlined(sr_canvas *c, float x, float y, const char *s,
@@ -1110,41 +1093,53 @@ static void composite_tint_px(uint32_t *to, uint32_t s, int ga,
           ((uint32_t)g << 8) | (uint32_t)b;
 }
 
-void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,
-                   float alpha)
-{
-    blit_region region;
+/* Overlap-safe iteration order for the unscaled compositing blits: when
+ * source and destination share storage and the copy shifts right or down,
+ * walk that axis backwards so no source pixel is overwritten before it is
+ * read. */
+typedef struct blit_iter {
     int y_first;
     int y_stop;
     int y_step;
     int x_first;
     int x_stop;
     int x_step;
+} blit_iter;
+
+static blit_iter overlap_blit_iter(const sr_canvas *dst,
+                                   const sr_canvas *src, int x, int y,
+                                   const blit_region *region)
+{
+    blit_iter it = {region->y0, region->y1, 1,
+                    region->x0, region->x1, 1};
+
+    if (dst->px == src->px) {
+        if (y > 0) {
+            it.y_first = region->y1 - 1;
+            it.y_stop = region->y0 - 1;
+            it.y_step = -1;
+        }
+        if (x > 0) {
+            it.x_first = region->x1 - 1;
+            it.x_stop = region->x0 - 1;
+            it.x_step = -1;
+        }
+    }
+    return it;
+}
+
+void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,
+                   float alpha)
+{
+    blit_region region;
 
     if (!canvas_ok(dst) || !canvas_ok(src) || alpha <= 0.0f) return;
     if (!source_blit_region(dst, src, x, y, &region)) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
     if (ga <= 0) return;
-    y_first = region.y0;
-    y_stop = region.y1;
-    y_step = 1;
-    x_first = region.x0;
-    x_stop = region.x1;
-    x_step = 1;
-    if (dst->px == src->px) {
-        if (y > 0) {
-            y_first = region.y1 - 1;
-            y_stop = region.y0 - 1;
-            y_step = -1;
-        }
-        if (x > 0) {
-            x_first = region.x1 - 1;
-            x_stop = region.x0 - 1;
-            x_step = -1;
-        }
-    }
-    for (int sy = y_first; sy != y_stop; sy += y_step) {
-        for (int sx = x_first; sx != x_stop; sx += x_step) {
+    const blit_iter it = overlap_blit_iter(dst, src, x, y, &region);
+    for (int sy = it.y_first; sy != it.y_stop; sy += it.y_step) {
+        for (int sx = it.x_first; sx != it.x_stop; sx += it.x_step) {
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
             composite_px(&dst->px[(size_t)(y + sy) * (size_t)dst->w +
                                   (size_t)(x + sx)], s, ga);
@@ -1156,37 +1151,14 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
                   uint32_t rgb, float alpha)
 {
     blit_region region;
-    int y_first;
-    int y_stop;
-    int y_step;
-    int x_first;
-    int x_stop;
-    int x_step;
 
     if (!canvas_ok(dst) || !canvas_ok(src) || alpha <= 0.0f) return;
     if (!source_blit_region(dst, src, x, y, &region)) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
     if (ga <= 0) return;
-    y_first = region.y0;
-    y_stop = region.y1;
-    y_step = 1;
-    x_first = region.x0;
-    x_stop = region.x1;
-    x_step = 1;
-    if (dst->px == src->px) {
-        if (y > 0) {
-            y_first = region.y1 - 1;
-            y_stop = region.y0 - 1;
-            y_step = -1;
-        }
-        if (x > 0) {
-            x_first = region.x1 - 1;
-            x_stop = region.x0 - 1;
-            x_step = -1;
-        }
-    }
-    for (int sy = y_first; sy != y_stop; sy += y_step) {
-        for (int sx = x_first; sx != x_stop; sx += x_step) {
+    const blit_iter it = overlap_blit_iter(dst, src, x, y, &region);
+    for (int sy = it.y_first; sy != it.y_stop; sy += it.y_step) {
+        for (int sx = it.x_first; sx != it.x_stop; sx += it.x_step) {
             uint32_t s = src->px[(size_t)sy * (size_t)src->w + (size_t)sx];
             uint32_t *to = &dst->px[(size_t)(y + sy) * (size_t)dst->w +
                                     (size_t)(x + sx)];
