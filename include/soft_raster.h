@@ -257,8 +257,9 @@ void sr_text_shadow(sr_canvas *c, float x, float y, const char *s,
  *   opaque black letterbox bars; output alpha is forced opaque.
  *
  * Source and destination storage must not overlap for scaled, transformed,
- * or letterbox blits. The three unscaled blits support overlap within the
- * same canvas.
+ * or letterbox blits; passing the same pixel storage as both makes these
+ * calls a no-op. The three unscaled blits support overlap within the same
+ * canvas.
  */
 void sr_blit(sr_canvas *dst, const sr_canvas *src, int x, int y);
 void sr_blit_alpha(sr_canvas *dst, const sr_canvas *src, int x, int y,

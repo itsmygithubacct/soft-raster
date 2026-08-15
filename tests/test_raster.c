@@ -1559,6 +1559,14 @@ test_scale_canvas_clear_and_alias_cases(void)
     randomize_canvas(&before, 0xfeedc0deu);
     sr_scale_canvas(&dst, &dst);
     CHECK(canvases_identical(&dst, &before));
+
+    /* the scaled and transformed blits treat the aliased canvas the same
+     * way instead of reading pixels they have already written */
+    sr_blit_scaled(&dst, &dst, 0, 0, 20, 20, 1.0f);
+    CHECK(canvases_identical(&dst, &before));
+    sr_blit_transformed(&dst, &dst, 0, 0, SR_TRANSFORM_FLIP_HORIZONTAL,
+                        1.0f, false, 0u);
+    CHECK(canvases_identical(&dst, &before));
     sr_canvas_free(&before);
     sr_canvas_free(&dst);
     return true;

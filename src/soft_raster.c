@@ -1040,6 +1040,7 @@ void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
 
     if (!canvas_ok(dst) || !canvas_ok(src) || w <= 0 || h <= 0 ||
         alpha <= 0.0f) return;
+    if (dst->px == src->px) return;  /* aliased storage: same-buffer no-op */
     if ((int64_t)x + w <= 0 || (int64_t)y + h <= 0 ||
         x >= dst->w || y >= dst->h) return;
     int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
@@ -1105,6 +1106,7 @@ void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
 
     if (!canvas_ok(dst) || !canvas_ok(src) || !(alpha > 0.0f) ||
         (transform & (uint8_t)~known) != 0u) return;
+    if (dst->px == src->px) return;  /* aliased storage: same-buffer no-op */
     output_w = (transform & SR_TRANSFORM_FLIP_DIAGONAL) != 0u
         ? src->h : src->w;
     output_h = (transform & SR_TRANSFORM_FLIP_DIAGONAL) != 0u

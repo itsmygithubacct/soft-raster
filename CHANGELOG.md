@@ -37,6 +37,9 @@
 - Extend the native benchmark with diagonal line, thin ring, ellipse,
   screenful-of-text, and opaque rectangle cases, covering the primitives
   with the worst scaling behavior.
+- Make `sr_blit_scaled()` and `sr_blit_transformed()` no-ops on an aliased
+  canvas, matching `sr_scale_canvas()`, instead of silently corrupting
+  pixels on input the non-overlap contract already declares invalid.
 
 ## 0.3.0 - 2026-07-22
 
