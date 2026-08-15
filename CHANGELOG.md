@@ -53,6 +53,9 @@
 - Rasterize `sr_ring()` as two chord runs per row instead of scanning the
   whole bounding box including the hollow interior, making a thin
   radius-300 ring roughly 17x cheaper with byte-identical output.
+- Clear only the letterbox bars in `sr_scale_canvas()` instead of the
+  whole destination the scale loop is about to overwrite, removing a full
+  destination write from every aspect-matching present.
 
 ## 0.3.0 - 2026-07-22
 

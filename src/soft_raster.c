@@ -1326,6 +1326,18 @@ void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
     }
 }
 
+/* Opaque-black rectangle used for the letterbox bars; matches the bytes
+ * sr_clear(dst, 0x000000) writes. */
+static void clear_bar(sr_canvas *dst, int x0, int y0, int x1, int y1)
+{
+    for (int y = y0; y < y1; y++) {
+        uint32_t *row = &dst->px[(size_t)y * (size_t)dst->w];
+
+        for (int x = x0; x < x1; x++)
+            row[x] = 0xff000000u;
+    }
+}
+
 void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src)
 {
     int dw;
@@ -1334,8 +1346,10 @@ void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src)
 
     if (!canvas_ok(dst)) return;
     if (canvas_ok(src) && dst->px == src->px) return;
-    sr_clear(dst, 0x000000u);
-    if (!canvas_ok(src)) return;
+    if (!canvas_ok(src)) {
+        sr_clear(dst, 0x000000u);
+        return;
+    }
     dw = dst->w;
     scaled_height = (int64_t)dw * src->h / src->w;
     if (scaled_height > dst->h) {
@@ -1344,9 +1358,19 @@ void sr_scale_canvas(sr_canvas *dst, const sr_canvas *src)
     } else {
         dh = (int)scaled_height;
     }
-    if (dw <= 0 || dh <= 0) return;
+    if (dw <= 0 || dh <= 0) {
+        sr_clear(dst, 0x000000u);
+        return;
+    }
     int off_x = (dst->w - dw) / 2;
     int off_y = (dst->h - dh) / 2;
+    /* The scale loop stores to every pixel of the fitted rectangle, so
+     * only the letterbox bars around it need clearing; at most one axis
+     * has bars, but all four strips together tile the exact complement. */
+    clear_bar(dst, 0, 0, off_x, dst->h);
+    clear_bar(dst, off_x + dw, 0, dst->w, dst->h);
+    clear_bar(dst, off_x, 0, off_x + dw, off_y);
+    clear_bar(dst, off_x, off_y + dh, off_x + dw, dst->h);
     int sy = 0;
     int64_t y_error = 0;
     const int sy_step = src->h / dh;
