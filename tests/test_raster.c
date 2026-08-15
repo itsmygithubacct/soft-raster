@@ -1165,6 +1165,405 @@ test_ppm_round_trip(void)
     return true;
 }
 
+/* ---- Byte-identity references -------------------------------------- */
+
+/* The primitives below promise byte-for-byte output, so any span skipping
+ * or fast path they grow must be provably invisible.  Each reference here
+ * walks every canvas pixel and applies the exact per-pixel coverage and
+ * blend expressions the primitive documents, through the public
+ * sr_blend(); drawing onto identical randomized destinations and
+ * comparing whole buffers pins the contract for opaque and translucent
+ * alpha alike. */
+
+static uint32_t test_rng_state;
+
+static uint32_t
+test_rng_next(void)
+{
+    test_rng_state = test_rng_state * 1664525u + 1013904223u;
+    return test_rng_state;
+}
+
+static void
+randomize_canvas(sr_canvas *c, uint32_t seed)
+{
+    const size_t count = (size_t)c->w * (size_t)c->h;
+    size_t i;
+
+    test_rng_state = seed;
+    for (i = 0u; i < count; i++)
+        c->px[i] = test_rng_next();
+}
+
+static bool
+canvases_identical(const sr_canvas *a, const sr_canvas *b)
+{
+    return a->w == b->w && a->h == b->h &&
+           memcmp(a->px, b->px,
+                  (size_t)a->w * (size_t)a->h * sizeof(uint32_t)) == 0;
+}
+
+static float
+ref_clampf(float v, float lo, float hi)
+{
+    if (!(v >= lo)) return lo;
+    return v > hi ? hi : v;
+}
+
+static void
+ref_line(sr_canvas *c, float x0, float y0, float x1, float y1,
+         float width, uint32_t rgb, float alpha, int dash_on, int dash_off)
+{
+    float dx = x1 - x0, dy = y1 - y0;
+    float len2 = dx * dx + dy * dy;
+    float hw = width * 0.5f;
+    float len;
+    int64_t period = (int64_t)dash_on + (int64_t)dash_off;
+    int x, y;
+
+    if (hw < 0.5f) hw = 0.5f;
+    if (len2 < 0.25f) {
+        sr_fill_circle(c, x0, y0, hw, rgb, alpha);
+        return;
+    }
+    len = sqrtf(len2);
+    for (y = 0; y < c->h; y++)
+        for (x = 0; x < c->w; x++) {
+            float px = (float)x + 0.5f - x0;
+            float py = (float)y + 0.5f - y0;
+            float t = ref_clampf((px * dx + py * dy) / len2, 0.0f, 1.0f);
+            float qx = px - t * dx;
+            float qy = py - t * dy;
+            float cov = hw + 0.5f - sqrtf(qx * qx + qy * qy);
+            if (cov <= 0.0f) continue;
+            if (cov > 1.0f) cov = 1.0f;
+            if (dash_on >= 0 && dash_off >= 0 && period > 0 &&
+                fmodf(t * len, (float)period) >= (float)dash_on) continue;
+            sr_blend(c, x, y, rgb, alpha * cov);
+        }
+}
+
+static void
+ref_fill_rect(sr_canvas *c, float x, float y, float w, float h,
+              uint32_t rgb, float alpha)
+{
+    int px, py;
+
+    for (py = 0; py < c->h; py++) {
+        float cy = fminf((float)(py + 1), y + h) - fmaxf((float)py, y);
+        if (cy <= 0.0f) continue;
+        if (cy > 1.0f) cy = 1.0f;
+        for (px = 0; px < c->w; px++) {
+            float cx = fminf((float)(px + 1), x + w) - fmaxf((float)px, x);
+            if (cx <= 0.0f) continue;
+            if (cx > 1.0f) cx = 1.0f;
+            sr_blend(c, px, py, rgb, alpha * cx * cy);
+        }
+    }
+}
+
+static void
+ref_ring(sr_canvas *c, float cx, float cy, float r, float width,
+         uint32_t rgb, float alpha)
+{
+    float hw = width * 0.5f;
+    int x, y;
+
+    for (y = 0; y < c->h; y++)
+        for (x = 0; x < c->w; x++) {
+            float dx = (float)x + 0.5f - cx;
+            float dy = (float)y + 0.5f - cy;
+            float d = sqrtf(dx * dx + dy * dy);
+            float cov = hw + 0.5f - fabsf(d - r);
+            if (cov <= 0.0f) continue;
+            sr_blend(c, x, y, rgb,
+                     alpha * (cov > 1.0f ? 1.0f : cov));
+        }
+}
+
+static bool
+test_line_matches_blend_reference(void)
+{
+    static const struct {
+        float x0, y0, x1, y1, width, alpha;
+        int dash_on, dash_off;
+    } cases[] = {
+        {0.0f, 0.0f, 63.0f, 63.0f, 1.0f, 1.0f, 0, 0},
+        {0.0f, 63.0f, 63.0f, 0.0f, 2.0f, 0.375f, 0, 0},
+        {5.2f, 3.7f, 58.9f, 47.1f, 4.5f, 1.0f, 0, 0},
+        {-20.0f, -10.0f, 90.0f, 80.0f, 3.0f, 0.6f, 5, 3},
+        {31.5f, -8.0f, 33.5f, 70.0f, 1.0f, 1.0f, 0, 0},
+        {-8.0f, 30.25f, 70.0f, 33.75f, 2.5f, 0.5f, 7, 2},
+        {10.0f, 50.0f, 55.0f, 12.0f, 8.0f, 0.25f, 0, 0},
+    };
+    size_t i;
+    sr_canvas got, want;
+
+    for (i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const uint32_t seed = 0x51a7e000u + (uint32_t)i;
+
+        CHECK(sr_canvas_init(&got, 64, 64));
+        CHECK(sr_canvas_init(&want, 64, 64));
+        randomize_canvas(&got, seed);
+        randomize_canvas(&want, seed);
+        sr_line(&got, cases[i].x0, cases[i].y0, cases[i].x1, cases[i].y1,
+                cases[i].width, 0x37c2a1u, cases[i].alpha,
+                cases[i].dash_on, cases[i].dash_off);
+        ref_line(&want, cases[i].x0, cases[i].y0, cases[i].x1, cases[i].y1,
+                 cases[i].width, 0x37c2a1u, cases[i].alpha,
+                 cases[i].dash_on, cases[i].dash_off);
+        CHECK(canvases_identical(&got, &want));
+        sr_canvas_free(&got);
+        sr_canvas_free(&want);
+    }
+
+    /* the clip rectangle must bound the line the same way */
+    CHECK(sr_canvas_init(&got, 64, 64));
+    CHECK(sr_canvas_init(&want, 64, 64));
+    randomize_canvas(&got, 0x11ce5eedu);
+    randomize_canvas(&want, 0x11ce5eedu);
+    sr_canvas_set_clip(&got, 8, 6, 40, 44);
+    sr_canvas_set_clip(&want, 8, 6, 40, 44);
+    sr_line(&got, -4.0f, 2.0f, 66.0f, 60.0f, 3.5f, 0xf0e0d0u, 0.8f, 0, 0);
+    ref_line(&want, -4.0f, 2.0f, 66.0f, 60.0f, 3.5f, 0xf0e0d0u, 0.8f, 0, 0);
+    CHECK(canvases_identical(&got, &want));
+    sr_canvas_free(&got);
+    sr_canvas_free(&want);
+    return true;
+}
+
+static bool
+test_fill_rect_matches_blend_reference(void)
+{
+    static const struct {
+        float x, y, w, h, alpha;
+    } cases[] = {
+        {3.3f, 4.7f, 25.6f, 17.2f, 1.0f},
+        {3.3f, 4.7f, 25.6f, 17.2f, 0.375f},
+        {-5.5f, -2.25f, 40.75f, 30.5f, 1.0f},
+        {0.0f, 0.0f, 64.0f, 64.0f, 1.0f},
+        {0.5f, 0.5f, 63.0f, 63.0f, 0.5f},
+        {10.0f, 12.0f, 0.4f, 20.0f, 1.0f},
+    };
+    size_t i;
+    sr_canvas got, want;
+
+    for (i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const uint32_t seed = 0x2ec70000u + (uint32_t)i;
+
+        CHECK(sr_canvas_init(&got, 64, 64));
+        CHECK(sr_canvas_init(&want, 64, 64));
+        randomize_canvas(&got, seed);
+        randomize_canvas(&want, seed);
+        sr_fill_rect(&got, cases[i].x, cases[i].y, cases[i].w, cases[i].h,
+                     0xb45a92u, cases[i].alpha);
+        ref_fill_rect(&want, cases[i].x, cases[i].y, cases[i].w, cases[i].h,
+                      0xb45a92u, cases[i].alpha);
+        CHECK(canvases_identical(&got, &want));
+        sr_canvas_free(&got);
+        sr_canvas_free(&want);
+    }
+
+    CHECK(sr_canvas_init(&got, 64, 64));
+    CHECK(sr_canvas_init(&want, 64, 64));
+    randomize_canvas(&got, 0x2ec7c11bu);
+    randomize_canvas(&want, 0x2ec7c11bu);
+    sr_canvas_set_clip(&got, 5, 9, 30, 28);
+    sr_canvas_set_clip(&want, 5, 9, 30, 28);
+    sr_fill_rect(&got, 2.5f, 3.75f, 50.0f, 40.0f, 0x87cefau, 1.0f);
+    ref_fill_rect(&want, 2.5f, 3.75f, 50.0f, 40.0f, 0x87cefau, 1.0f);
+    CHECK(canvases_identical(&got, &want));
+    sr_canvas_free(&got);
+    sr_canvas_free(&want);
+    return true;
+}
+
+static bool
+test_ring_matches_blend_reference(void)
+{
+    static const struct {
+        float cx, cy, r, width, alpha;
+    } cases[] = {
+        {32.0f, 32.0f, 20.0f, 3.0f, 1.0f},
+        {32.0f, 32.0f, 28.0f, 1.5f, 0.375f},
+        {32.0f, 32.0f, 5.0f, 2.0f, 1.0f},
+        {10.3f, 52.8f, 25.0f, 4.5f, 0.5f},
+        {32.5f, 31.5f, 14.25f, 0.5f, 1.0f},
+        {31.0f, 33.0f, 3.0f, 9.0f, 0.75f},
+    };
+    size_t i;
+    sr_canvas got, want;
+
+    for (i = 0u; i < sizeof cases / sizeof cases[0]; i++) {
+        const uint32_t seed = 0x21360000u + (uint32_t)i;
+
+        CHECK(sr_canvas_init(&got, 64, 64));
+        CHECK(sr_canvas_init(&want, 64, 64));
+        randomize_canvas(&got, seed);
+        randomize_canvas(&want, seed);
+        sr_ring(&got, cases[i].cx, cases[i].cy, cases[i].r, cases[i].width,
+                0x5f9ea0u, cases[i].alpha);
+        ref_ring(&want, cases[i].cx, cases[i].cy, cases[i].r, cases[i].width,
+                 0x5f9ea0u, cases[i].alpha);
+        CHECK(canvases_identical(&got, &want));
+        sr_canvas_free(&got);
+        sr_canvas_free(&want);
+    }
+
+    CHECK(sr_canvas_init(&got, 64, 64));
+    CHECK(sr_canvas_init(&want, 64, 64));
+    randomize_canvas(&got, 0x21365ee0u);
+    randomize_canvas(&want, 0x21365ee0u);
+    sr_canvas_set_clip(&got, 12, 10, 36, 40);
+    sr_canvas_set_clip(&want, 12, 10, 36, 40);
+    sr_ring(&got, 30.0f, 34.0f, 22.0f, 2.5f, 0xdeb887u, 0.9f);
+    ref_ring(&want, 30.0f, 34.0f, 22.0f, 2.5f, 0xdeb887u, 0.9f);
+    CHECK(canvases_identical(&got, &want));
+    sr_canvas_free(&got);
+    sr_canvas_free(&want);
+    return true;
+}
+
+/* The hard-edged fills apply one uniform alpha to every covered pixel, so
+ * the covered set can be captured once (an opaque draw over transparency
+ * lands exactly on 0xffffffff) and replayed through sr_blend() or an
+ * opaque store to predict both translucent and opaque results exactly. */
+static void
+shape_concave_polygon(sr_canvas *c, uint32_t rgb, float alpha)
+{
+    static const float xs[6] = {6.0f, 52.0f, 52.0f, 26.0f, 26.0f, 6.0f};
+    static const float ys[6] = {8.0f, 8.0f, 26.0f, 26.0f, 56.0f, 56.0f};
+
+    sr_fill_polygon(c, xs, ys, 6u, rgb, alpha);
+}
+
+static void
+shape_triangle(sr_canvas *c, uint32_t rgb, float alpha)
+{
+    sr_fill_triangle(c, 3.5f, 4.0f, 60.0f, 12.0f, 18.0f, 58.0f, rgb, alpha);
+}
+
+static void
+shape_convex(sr_canvas *c, uint32_t rgb, float alpha)
+{
+    static const float xs[5] = {12.0f, 44.0f, 58.0f, 30.0f, 6.0f};
+    static const float ys[5] = {4.0f, 6.0f, 40.0f, 60.0f, 30.0f};
+
+    sr_fill_convex(c, xs, ys, 5u, rgb, alpha);
+}
+
+static bool
+shape_matches_blend_reference(void (*draw)(sr_canvas *, uint32_t, float),
+                              uint32_t seed)
+{
+    sr_canvas mask, got, want;
+    int x, y;
+    bool covered_some = false;
+
+    CHECK(sr_canvas_init(&mask, 64, 64));
+    draw(&mask, 0xffffffu, 1.0f);
+    CHECK(sr_canvas_init(&got, 64, 64));
+    CHECK(sr_canvas_init(&want, 64, 64));
+
+    randomize_canvas(&got, seed);
+    randomize_canvas(&want, seed);
+    draw(&got, 0x123456u, 1.0f);
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 64; x++) {
+            const uint32_t m = px_at(&mask, x, y);
+
+            CHECK(m == 0u || m == 0xffffffffu);
+            if (m == 0u) continue;
+            covered_some = true;
+            want.px[(size_t)y * 64u + (size_t)x] = 0xff123456u;
+        }
+    CHECK(covered_some);
+    CHECK(canvases_identical(&got, &want));
+
+    randomize_canvas(&got, seed ^ 0x9e3779b9u);
+    randomize_canvas(&want, seed ^ 0x9e3779b9u);
+    draw(&got, 0x89abcdu, 0.375f);
+    for (y = 0; y < 64; y++)
+        for (x = 0; x < 64; x++)
+            if (px_at(&mask, x, y) != 0u)
+                sr_blend(&want, x, y, 0x89abcdu, 0.375f);
+    CHECK(canvases_identical(&got, &want));
+
+    sr_canvas_free(&mask);
+    sr_canvas_free(&got);
+    sr_canvas_free(&want);
+    return true;
+}
+
+static bool
+test_uniform_fills_match_blend_reference(void)
+{
+    CHECK(shape_matches_blend_reference(shape_concave_polygon, 0x0badf00du));
+    CHECK(shape_matches_blend_reference(shape_triangle, 0x12345678u));
+    CHECK(shape_matches_blend_reference(shape_convex, 0x5eedbea7u));
+    return true;
+}
+
+static bool
+test_text_wrappers_match_selected_face(void)
+{
+    sr_canvas a, b;
+
+    CHECK(sr_canvas_init(&a, 96, 40));
+    CHECK(sr_canvas_init(&b, 96, 40));
+    randomize_canvas(&a, 0x7e577e57u);
+    randomize_canvas(&b, 0x7e577e57u);
+    sr_text(&a, -3.2f, 5.9f, "Mixed 123 !?", 0x40c080u, 0.8f, 2);
+    sr_text_in(SR_FONT_FIXED_8X16, &b, -3.2f, 5.9f, "Mixed 123 !?",
+               0x40c080u, 0.8f, 2);
+    CHECK(canvases_identical(&a, &b));
+
+    randomize_canvas(&a, 0x00c0ffeeu);
+    randomize_canvas(&b, 0x00c0ffeeu);
+    sr_canvas_set_clip(&a, 10, 4, 60, 30);
+    sr_canvas_set_clip(&b, 10, 4, 60, 30);
+    sr_text_center(&a, 48.0f, 7.5f, "Centered text", 0xffffffu, 0.6f, 1);
+    sr_text_center_in(SR_FONT_FIXED_8X16, &b, 48.0f, 7.5f, "Centered text",
+                      0xffffffu, 0.6f, 1);
+    CHECK(canvases_identical(&a, &b));
+    sr_canvas_free(&a);
+    sr_canvas_free(&b);
+    return true;
+}
+
+static bool
+test_scale_canvas_clear_and_alias_cases(void)
+{
+    sr_canvas dst, src, before;
+    size_t i;
+
+    /* an unusable source still clears the whole destination */
+    CHECK(sr_canvas_init(&dst, 10, 10));
+    randomize_canvas(&dst, 0x5ca1ab1eu);
+    sr_scale_canvas(&dst, NULL);
+    for (i = 0u; i < 100u; i++)
+        CHECK(dst.px[i] == 0xff000000u);
+
+    /* an extreme aspect ratio whose fit rounds to zero clears too */
+    CHECK(sr_canvas_init(&src, 1000, 1));
+    sr_clear(&src, 0xffffffu);
+    randomize_canvas(&dst, 0x0ddba11u);
+    sr_scale_canvas(&dst, &src);
+    for (i = 0u; i < 100u; i++)
+        CHECK(dst.px[i] == 0xff000000u);
+    sr_canvas_free(&src);
+
+    /* scaling a canvas onto itself is the documented no-op */
+    CHECK(sr_canvas_init(&before, 10, 10));
+    randomize_canvas(&dst, 0xfeedc0deu);
+    randomize_canvas(&before, 0xfeedc0deu);
+    sr_scale_canvas(&dst, &dst);
+    CHECK(canvases_identical(&dst, &before));
+    sr_canvas_free(&before);
+    sr_canvas_free(&dst);
+    return true;
+}
+
 typedef bool (*test_function)(void);
 
 typedef struct test_case {
@@ -1210,7 +1609,17 @@ main(void)
          test_blit_transformed_composition_and_clipping},
         {"letterbox scaler geometry", test_letterbox_scaler_geometry},
         {"PPM load/write round-trip", test_ppm_round_trip},
-        {"selectable faces", test_selectable_faces}
+        {"selectable faces", test_selectable_faces},
+        {"line matches blend reference", test_line_matches_blend_reference},
+        {"fill_rect matches blend reference",
+         test_fill_rect_matches_blend_reference},
+        {"ring matches blend reference", test_ring_matches_blend_reference},
+        {"uniform fills match blend reference",
+         test_uniform_fills_match_blend_reference},
+        {"text wrappers match selected face",
+         test_text_wrappers_match_selected_face},
+        {"scale_canvas clear and alias cases",
+         test_scale_canvas_clear_and_alias_cases}
     };
     size_t passed = 0u;
     size_t index;
