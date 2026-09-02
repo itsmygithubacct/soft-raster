@@ -78,7 +78,8 @@ class SoftRasterLibrary:
     ``path`` can be an absolute path or a dynamic-loader name. When omitted,
     the loader checks ``SOFT_RASTER_LIBRARY``, a bundled ``_libs`` directory,
     the conventional sibling source checkout, and finally the system loader.
-    Additive 0.4 RGB-packing and selectable-font APIs are feature-detected.
+    Additive 0.4 RGB-packing and selectable-font APIs and the additive 0.5
+    graph primitives are feature-detected.
     """
 
     abi_version = (0, 3)
@@ -248,6 +249,49 @@ class SoftRasterLibrary:
             [canvas, floats, floats, ctypes.c_size_t, color, floating],
             None,
         )
+
+        graph_symbols = (
+            self._declare_optional(
+                "sr_polyline",
+                [
+                    canvas,
+                    floats,
+                    floats,
+                    ctypes.c_size_t,
+                    floating,
+                    color,
+                    floating,
+                    integer,
+                    integer,
+                    floating,
+                    integer,
+                ],
+                None,
+            ),
+            self._declare_optional(
+                "sr_fill_polygon_aa",
+                [canvas, floats, floats, ctypes.c_size_t, color, floating],
+                None,
+            ),
+            self._declare_optional(
+                "sr_fill_round_rect",
+                [canvas, floating, floating, floating, floating, floating,
+                 color, floating],
+                None,
+            ),
+            self._declare_optional(
+                "sr_stroke_round_rect",
+                [canvas, floating, floating, floating, floating, floating,
+                 floating, color, floating],
+                None,
+            ),
+            self._declare_optional(
+                "sr_flatten_cubic",
+                [floating] * 9 + [floats, floats, ctypes.c_size_t],
+                ctypes.c_size_t,
+            ),
+        )
+        self.supports_graph_primitives = all(graph_symbols)
 
         self._declare("sr_text_width", [ctypes.c_char_p, integer], integer)
         self._declare(

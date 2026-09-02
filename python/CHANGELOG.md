@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- Add `Canvas.polyline()`, `Canvas.fill_polygon_aa()`,
+  `Canvas.fill_round_rect()`, `Canvas.stroke_round_rect()`, `flatten_cubic()`
+  and the `Cap` enum, binding the additive native 0.5 graph primitives. They
+  are feature-detected through `SoftRasterLibrary.supports_graph_primitives`
+  and report an actionable compatibility error against an older library, so a
+  0.3 or 0.4 consumer is unaffected.
+
 - Add `Canvas.fill_polygon()`, binding `sr_fill_polygon()` for concave
   outlines.
 - Feature-detect the additive native 0.4 API. Use direct `sr_pack_rgb()` for

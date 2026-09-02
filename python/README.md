@@ -38,6 +38,12 @@ platform library registry, and the dynamic loader's default paths. A configured
 environment override is authoritative, so a typo fails clearly rather than
 loading a surprising ABI.
 
+A 0.5 library additionally enables `Canvas.polyline()` (one blend per pixel at
+a shared vertex, and a dash phase that runs along the whole path),
+`Canvas.fill_polygon_aa()`, the rounded-rectangle calls and `flatten_cubic()`.
+`SoftRasterLibrary.supports_graph_primitives` reports whether they are
+available.
+
 Install the pure Python package with:
 
 ```bash

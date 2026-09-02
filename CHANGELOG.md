@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- Add `sr_polyline()`, which strokes a chain of segments as one shape. Stroking
+  a chain with one `sr_line()` per segment blends each shared vertex twice —
+  measured at alpha 0.5, a plain segment pixel lands on 127 and the joint on
+  191 — and restarts the dash phase at every vertex, so a dashed poly-line
+  breaks its pattern at every bend. `sr_polyline()` takes coverage as the
+  maximum over the segments rather than a sequence of blends, so each pixel is
+  blended exactly once and interior vertices become round joins, and it
+  measures the dash phase along the whole path plus a new `dash_offset`. Two
+  points with `SR_CAP_ROUND` and no dash reproduce `sr_line()` byte for byte.
+- Add `SR_CAP_ROUND`, `SR_CAP_BUTT` and `SR_CAP_SQUARE` for the two free ends
+  of a stroked poly-line. A butt cap is what an arrowhead needs; a round cap
+  under one shows as a blob past the tip.
+- Add `sr_fill_polygon_aa()`. `sr_fill_triangle()`, `sr_fill_convex()` and
+  `sr_fill_polygon()` sample the pixel center, so a scanline across a filled
+  triangle contains only the values 0 and 255; beside `sr_fill_circle()`, whose
+  rim carries every value between, the difference reads as a defect rather than
+  a style. The new fill samples four sub-scanlines per row with exact
+  horizontal span overlap, at about four times the cost, and agrees with
+  `sr_fill_polygon()` on the interior.
+- Add `sr_fill_round_rect()` and `sr_stroke_round_rect()`. A rounded rectangle
+  assembled from `sr_fill_rect()` and `sr_fill_circle()` seams where the bars
+  meet the arcs; coverage here comes from the exact signed distance to the
+  shape, so both edges are anti-aliased and the stroke is a band around the
+  outline. The stroke is centered on the outline like `sr_ring()`, not inside
+  it like `sr_stroke_rect()`.
+- Add `sr_flatten_cubic()`, adaptive cubic Bézier subdivision into points for
+  `sr_polyline()`, bounded by `SR_CUBIC_MAX_DEPTH`. It reports the point count
+  a curve needs whether or not a buffer was supplied, so a caller can size one
+  in a first pass.
+- Bump `SR_VERSION_MINOR` to 5. Every addition is additive; no existing call
+  changed behaviour, and both existing test suites pass unmodified.
+
 - Add `sr_pack_rgb()` for direct tightly packed RGB output, avoiding the
   intermediate RGBA allocation and channel-dropping pass used by presenters.
 - Add per-call selectable embedded fonts, including the compact 7x14 face,

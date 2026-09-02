@@ -41,7 +41,7 @@ extern "C" {
 #endif
 
 #define SR_VERSION_MAJOR 0
-#define SR_VERSION_MINOR 4
+#define SR_VERSION_MINOR 5
 #define SR_VERSION_PATCH 0
 
 /* Embedded font glyph cell, before scaling. */
@@ -184,6 +184,107 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
                      size_t count, uint32_t rgb, float alpha);
 
 /*
+ * Stroked polylines
+ * -----------------
+ * sr_line() strokes one segment.  Stroking a chain of them by calling it
+ * once per segment is wrong in two measurable ways, both of which show up
+ * in any graph or chart drawing:
+ *
+ * - Each call blends independently, so the round cap each segment puts at a
+ *   shared vertex is blended twice.  At alpha 0.5 a plain segment pixel
+ *   lands on 127 and the joint lands on 191 -- every bend grows a dark bead.
+ * - The dash pattern is measured from the start of each segment, so the
+ *   phase restarts at every vertex and the pattern breaks at every bend.
+ *
+ * sr_polyline() strokes the whole chain as one shape.  Coverage is the
+ * maximum over the segments rather than a sequence of blends, so every
+ * pixel is blended exactly once and interior vertices become round joins;
+ * the dash phase is measured along the whole path, plus dash_offset.
+ * Passing two points with SR_CAP_ROUND and no dash draws what sr_line()
+ * draws.
+ *
+ * Joins are always round.  Caps apply only to the two free ends: SR_CAP_BUTT
+ * ends the stroke on the end point (what you want when an arrowhead covers
+ * the end), SR_CAP_SQUARE extends it by half the width, SR_CAP_ROUND is a
+ * half disc.  A closed outline is drawn by repeating the first point last,
+ * which makes both ends interior and the cap irrelevant.
+ *
+ * count must be at least 2; non-finite coordinates make the call a no-op.
+ * Memory is one float per pixel of the clipped bounding box width, taken
+ * from the stack for canvases up to 4096 pixels wide, plus one float per
+ * point for paths longer than 128 points.
+ */
+typedef enum sr_cap {
+    SR_CAP_ROUND = 0,
+    SR_CAP_BUTT,
+    SR_CAP_SQUARE
+} sr_cap;
+
+void sr_polyline(sr_canvas *c, const float *xs, const float *ys, size_t count,
+                 float width, uint32_t rgb, float alpha,
+                 int dash_on, int dash_off, float dash_offset, sr_cap cap);
+
+/*
+ * Anti-aliased polygon fill, concave permitted, even-odd like
+ * sr_fill_polygon().
+ *
+ * sr_fill_polygon() and sr_fill_triangle() sample the pixel center, so their
+ * coverage is 0 or 255 and nothing between: measured across a scanline of a
+ * filled triangle, the only two values present are 0 and 255.  Beside an
+ * sr_fill_circle(), whose rim carries the values in between, the difference
+ * reads as a defect rather than a style -- which is exactly the pairing an
+ * arrowhead on an edge into a round node makes.
+ *
+ * This samples four sub-scanlines per pixel row and computes exact
+ * horizontal span overlap within each, so an edge at any angle carries
+ * fractional coverage.  Cost is about four times sr_fill_polygon()'s.
+ * Geometry rules are otherwise identical, including even-odd filling and
+ * half-open spans, so the two agree on which pixels are fully inside.
+ */
+void sr_fill_polygon_aa(sr_canvas *c, const float *xs, const float *ys,
+                        size_t count, uint32_t rgb, float alpha);
+
+/*
+ * Rounded rectangles: the default node shape of every modern diagram, and
+ * the one shape that cannot be assembled from the existing primitives
+ * without seams where the bars meet the corner arcs.
+ *
+ * Coverage comes from the exact signed distance to the rounded rectangle,
+ * so both edges are anti-aliased and a stroke is a band around that
+ * distance.  r is clamped to half the smaller side; r <= 0 draws square
+ * corners and agrees with sr_fill_rect()/sr_stroke_rect() to within the
+ * usual half-pixel coverage rule.  The stroke is centered on the outline,
+ * like sr_ring() and unlike sr_stroke_rect(), whose bars sit inside it.
+ */
+void sr_fill_round_rect(sr_canvas *c, float x, float y, float w, float h,
+                        float r, uint32_t rgb, float alpha);
+void sr_stroke_round_rect(sr_canvas *c, float x, float y, float w, float h,
+                          float r, float line, uint32_t rgb, float alpha);
+
+/*
+ * Flattens a cubic Bezier into a polyline for sr_polyline().  Curves are the
+ * shape a routed graph edge wants and the shape sr_line() cannot make.
+ *
+ * Subdivision is adaptive: a span is split while its control points sit
+ * further than tolerance from the chord, so a nearly straight curve costs
+ * two points and a tight one costs as many as it needs.  tolerance is in
+ * pixels and is clamped to at least 1/32.
+ *
+ * Returns the number of points the flattened curve needs, including both
+ * end points, whether or not they were written.  Call it with capacity 0
+ * (xs and ys may be NULL) to size a buffer, or pass a buffer and compare
+ * the result against its capacity: a result larger than capacity means the
+ * curve was truncated at the last point that fit.  Non-finite input returns
+ * 0.  The point count is bounded by 2^SR_CUBIC_MAX_DEPTH + 1.
+ */
+#define SR_CUBIC_MAX_DEPTH 10
+
+size_t sr_flatten_cubic(float x0, float y0, float x1, float y1,
+                        float x2, float y2, float x3, float y3,
+                        float tolerance, float *xs, float *ys, size_t capacity);
+
+/*
+
  * Text over the embedded 8x16 font (ASCII 32..126; anything else renders
  * as '?').  scale is an integer pixel multiplier and is clamped to >= 1.
  * sr_text_width() returns the advance width of the string in pixels,

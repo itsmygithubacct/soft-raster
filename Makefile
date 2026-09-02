@@ -20,6 +20,7 @@ LIB_OBJS := $(BUILD_DIR)/soft_raster.o
 STATIC_LIB := $(BUILD_DIR)/lib$(PROJECT).a
 SHARED_LIB := $(BUILD_DIR)/lib$(PROJECT).so
 TEST_BIN := $(BUILD_DIR)/test-raster
+GRAPH_TEST_BIN := $(BUILD_DIR)/test-graph-primitives
 EXAMPLE_BIN := $(BUILD_DIR)/demo
 BENCH_BIN := $(BUILD_DIR)/bench-raster
 
@@ -44,14 +45,18 @@ $(SHARED_LIB): $(LIB_OBJS)
 $(TEST_BIN): tests/test_raster.c $(STATIC_LIB) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
+$(GRAPH_TEST_BIN): tests/test_graph_primitives.c $(STATIC_LIB) | $(BUILD_DIR)
+	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) $(LDLIBS) -o $@
+
 $(EXAMPLE_BIN): examples/demo.c $(STATIC_LIB) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
 $(BENCH_BIN): benchmarks/bench_raster.c $(STATIC_LIB) | $(BUILD_DIR)
 	$(CC) $(CPPFLAGS) $(CFLAGS) $< $(STATIC_LIB) $(LDFLAGS) $(LDLIBS) -o $@
 
-test: $(TEST_BIN)
+test: $(TEST_BIN) $(GRAPH_TEST_BIN)
 	$(TEST_BIN)
+	$(GRAPH_TEST_BIN)
 
 benchmark: $(BENCH_BIN)
 	$(BENCH_BIN)
@@ -66,6 +71,12 @@ sanitize: | $(BUILD_DIR)
 		src/soft_raster.c tests/test_raster.c \
 		-fsanitize=address,undefined $(LDLIBS) -o $(BUILD_DIR)/test-raster-sanitize
 	ASAN_OPTIONS=detect_leaks=1 $(BUILD_DIR)/test-raster-sanitize
+	$(CC) $(CPPFLAGS) -std=c11 -O1 -g3 $(WARNINGS) \
+		-fno-omit-frame-pointer -fsanitize=address,undefined \
+		src/soft_raster.c tests/test_graph_primitives.c \
+		-fsanitize=address,undefined $(LDLIBS) \
+		-o $(BUILD_DIR)/test-graph-primitives-sanitize
+	ASAN_OPTIONS=detect_leaks=1 $(BUILD_DIR)/test-graph-primitives-sanitize
 
 python-check:
 	$(MAKE) -C python check SOFT_RASTER_DIR=..

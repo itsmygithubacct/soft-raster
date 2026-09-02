@@ -807,6 +807,403 @@ void sr_fill_polygon(sr_canvas *c, const float *xs, const float *ys,
     if (crossings != stack_crossings) free(crossings);
 }
 
+/* ------------------------------------------------ 0.5 graph primitives */
+
+/*
+ * Several of the routines below accumulate coverage for one scanline before
+ * blending it, which is what lets a shape made of many overlapping pieces
+ * blend each pixel exactly once.  One row of floats is all that needs to be
+ * held, and a canvas up to SR_ROW_STACK_PIXELS wide holds it on the stack.
+ */
+#define SR_ROW_STACK_PIXELS 4096u
+#define SR_POLYLINE_STACK_POINTS 128u
+#define SR_AA_SUBSAMPLES 4
+
+static float sat(float v)
+{
+    if (!(v > 0.0f)) return 0.0f;
+    return v > 1.0f ? 1.0f : v;
+}
+
+/* Blend an accumulated coverage row into the canvas. */
+static void blend_cov_row(sr_canvas *c, int y, int x0, int x1,
+                          const float *row, uint32_t rgb, float alpha)
+{
+    for (int x = x0; x < x1; x++) {
+        float cov = row[(size_t)(x - x0)];
+        if (cov > 0.0f)
+            blend_px_unchecked(c, x, y, rgb, alpha * sat(cov));
+    }
+}
+
+/* Coverage of one stroked segment at a pixel center, with the cap rule for
+ * each end.  cap_a/cap_b are sr_cap values; an interior vertex uses
+ * SR_CAP_ROUND, which is what makes the join round. */
+static float segment_coverage(float ax, float ay, float bx, float by,
+                              float len, float hw, float px, float py,
+                              int cap_a, int cap_b, float *along)
+{
+    float dx = bx - ax, dy = by - ay;
+    float rx = px - ax, ry = py - ay;
+    float u, perp;
+
+    if (len > 0.0f) {
+        u = (rx * dx + ry * dy) / len;
+        perp = fabsf(rx * dy - ry * dx) / len;
+    } else {
+        u = 0.0f;
+        perp = sqrtf(rx * rx + ry * ry);
+    }
+    if (along != NULL) *along = u < 0.0f ? 0.0f : (u > len ? len : u);
+
+    float cov = sat(hw + 0.5f - perp);
+    if (cov <= 0.0f) return 0.0f;
+
+    switch (cap_a) {
+    case SR_CAP_BUTT:   cov = fminf(cov, sat(u + 0.5f)); break;
+    case SR_CAP_SQUARE: cov = fminf(cov, sat(u + hw + 0.5f)); break;
+    default:
+        if (u < 0.0f)
+            cov = fminf(cov, sat(hw + 0.5f - sqrtf(rx * rx + ry * ry)));
+        break;
+    }
+    if (cov <= 0.0f) return 0.0f;
+
+    float v = len - u;
+    switch (cap_b) {
+    case SR_CAP_BUTT:   cov = fminf(cov, sat(v + 0.5f)); break;
+    case SR_CAP_SQUARE: cov = fminf(cov, sat(v + hw + 0.5f)); break;
+    default:
+        if (v < 0.0f) {
+            float qx = px - bx, qy = py - by;
+            cov = fminf(cov, sat(hw + 0.5f - sqrtf(qx * qx + qy * qy)));
+        }
+        break;
+    }
+    return cov;
+}
+
+/* fmod that never returns a negative remainder, so a negative dash_offset
+ * shifts the pattern instead of inverting it. */
+static float dash_phase(float s, float period)
+{
+    float m = fmodf(s, period);
+    return m < 0.0f ? m + period : m;
+}
+
+void sr_polyline(sr_canvas *c, const float *xs, const float *ys, size_t count,
+                 float width, uint32_t rgb, float alpha,
+                 int dash_on, int dash_off, float dash_offset, sr_cap cap)
+{
+    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 2u ||
+        !isfinite(width) || !isfinite(dash_offset) || !(alpha > 0.0f))
+        return;
+    if (cap != SR_CAP_ROUND && cap != SR_CAP_BUTT && cap != SR_CAP_SQUARE)
+        return;
+    if (count > SIZE_MAX / sizeof(float)) return;
+
+    float min_x = xs[0], max_x = xs[0], min_y = ys[0], max_y = ys[0];
+    for (size_t i = 0u; i < count; i++) {
+        if (!isfinite(xs[i]) || !isfinite(ys[i])) return;
+        min_x = fminf(min_x, xs[i]);
+        max_x = fmaxf(max_x, xs[i]);
+        min_y = fminf(min_y, ys[i]);
+        max_y = fmaxf(max_y, ys[i]);
+    }
+
+    float hw = width * 0.5f;
+    if (hw < 0.5f) hw = 0.5f;
+    float pad = hw + 1.0f;
+    if (cap == SR_CAP_SQUARE) pad += hw;
+
+    int bx0 = clip_lo((double)min_x - (double)pad, c->clip_x0, c->clip_x1);
+    int bx1 = clip_hi((double)max_x + (double)pad, c->clip_x0, c->clip_x1);
+    int by0 = clip_lo((double)min_y - (double)pad, c->clip_y0, c->clip_y1);
+    int by1 = clip_hi((double)max_y + (double)pad, c->clip_y0, c->clip_y1);
+    if (bx0 >= bx1 || by0 >= by1) return;
+
+    float stack_cum[SR_POLYLINE_STACK_POINTS];
+    float *cum = stack_cum;
+    if (count > SR_POLYLINE_STACK_POINTS) {
+        cum = (float *)malloc(count * sizeof(float));
+        if (cum == NULL) return;
+    }
+    cum[0] = 0.0f;
+    for (size_t i = 1u; i < count; i++) {
+        float sx = xs[i] - xs[i - 1u], sy = ys[i] - ys[i - 1u];
+        cum[i] = cum[i - 1u] + sqrtf(sx * sx + sy * sy);
+    }
+
+    /* A path of zero total length is a dot, which is also what sr_line()
+     * draws for a degenerate segment. */
+    if (!(cum[count - 1u] > 0.0f)) {
+        if (cum != stack_cum) free(cum);
+        if (cap != SR_CAP_BUTT)
+            sr_fill_circle(c, xs[0], ys[0], hw, rgb, alpha);
+        return;
+    }
+
+    size_t row_w = (size_t)(bx1 - bx0);
+    float stack_row[SR_ROW_STACK_PIXELS];
+    float *row = stack_row;
+    if (row_w > SR_ROW_STACK_PIXELS) {
+        row = (float *)malloc(row_w * sizeof(float));
+        if (row == NULL) {
+            if (cum != stack_cum) free(cum);
+            return;
+        }
+    }
+
+    float period = (float)dash_on + (float)dash_off;
+    bool dashed = dash_on >= 0 && dash_off >= 0 && period > 0.0f;
+
+    for (int y = by0; y < by1; y++) {
+        memset(row, 0, row_w * sizeof(float));
+        float py = (float)y + 0.5f;
+
+        for (size_t i = 0u; i + 1u < count; i++) {
+            float ax = xs[i], ay = ys[i];
+            float bx = xs[i + 1u], by = ys[i + 1u];
+            float len = cum[i + 1u] - cum[i];
+            if (!(len > 0.0f)) continue;
+            if (py < fminf(ay, by) - pad || py > fmaxf(ay, by) + pad) continue;
+
+            int cap_a = i == 0u ? (int)cap : SR_CAP_ROUND;
+            int cap_b = i + 2u == count ? (int)cap : SR_CAP_ROUND;
+            int sx = clip_lo((double)fminf(ax, bx) - (double)pad, bx0, bx1);
+            int ex = clip_hi((double)fmaxf(ax, bx) + (double)pad, bx0, bx1);
+
+            for (int x = sx; x < ex; x++) {
+                float along = 0.0f;
+                float cov = segment_coverage(ax, ay, bx, by, len, hw,
+                                             (float)x + 0.5f, py,
+                                             cap_a, cap_b, &along);
+                if (cov <= 0.0f) continue;
+                if (dashed &&
+                    dash_phase(cum[i] + along + dash_offset, period) >=
+                        (float)dash_on)
+                    continue;
+                size_t k = (size_t)(x - bx0);
+                if (cov > row[k]) row[k] = cov;
+            }
+        }
+        blend_cov_row(c, y, bx0, bx1, row, rgb, alpha);
+    }
+
+    if (row != stack_row) free(row);
+    if (cum != stack_cum) free(cum);
+}
+
+void sr_fill_polygon_aa(sr_canvas *c, const float *xs, const float *ys,
+                        size_t count, uint32_t rgb, float alpha)
+{
+    if (!canvas_ok(c) || xs == NULL || ys == NULL || count < 3u ||
+        count > SIZE_MAX / sizeof(double) || !(alpha > 0.0f)) return;
+
+    float min_x = xs[0], max_x = xs[0], min_y = ys[0], max_y = ys[0];
+    for (size_t i = 0u; i < count; i++) {
+        if (!isfinite(xs[i]) || !isfinite(ys[i])) return;
+        min_x = fminf(min_x, xs[i]);
+        max_x = fmaxf(max_x, xs[i]);
+        min_y = fminf(min_y, ys[i]);
+        max_y = fmaxf(max_y, ys[i]);
+    }
+    int bx0 = clip_lo((double)min_x, c->clip_x0, c->clip_x1);
+    int bx1 = clip_hi((double)max_x, c->clip_x0, c->clip_x1);
+    int by0 = clip_lo((double)min_y, c->clip_y0, c->clip_y1);
+    int by1 = clip_hi((double)max_y, c->clip_y0, c->clip_y1);
+    if (bx0 >= bx1 || by0 >= by1) return;
+
+    double stack_crossings[POLY_STACK_CROSSINGS];
+    double *crossings = stack_crossings;
+    if (count > POLY_STACK_CROSSINGS) {
+        crossings = (double *)malloc(count * sizeof(double));
+        if (crossings == NULL) return;
+    }
+
+    size_t row_w = (size_t)(bx1 - bx0);
+    float stack_row[SR_ROW_STACK_PIXELS];
+    float *row = stack_row;
+    if (row_w > SR_ROW_STACK_PIXELS) {
+        row = (float *)malloc(row_w * sizeof(float));
+        if (row == NULL) {
+            if (crossings != stack_crossings) free(crossings);
+            return;
+        }
+    }
+    const double share = 1.0 / (double)SR_AA_SUBSAMPLES;
+
+    for (int y = by0; y < by1; y++) {
+        memset(row, 0, row_w * sizeof(float));
+
+        for (int s = 0; s < SR_AA_SUBSAMPLES; s++) {
+            double py = (double)y + ((double)s + 0.5) * share;
+            size_t found = 0u;
+
+            for (size_t i = 0u; i < count; i++) {
+                size_t next = i + 1u == count ? 0u : i + 1u;
+                double yi = (double)ys[i], yj = (double)ys[next];
+                if ((yi <= py) == (yj <= py)) continue;
+                crossings[found++] = (double)xs[i] +
+                    (py - yi) / (yj - yi) *
+                    ((double)xs[next] - (double)xs[i]);
+            }
+            if (found < 2u) continue;
+
+            for (size_t a = 1u; a < found; a++) {
+                double v = crossings[a];
+                size_t b = a;
+                while (b > 0u && crossings[b - 1u] > v) {
+                    crossings[b] = crossings[b - 1u];
+                    b--;
+                }
+                crossings[b] = v;
+            }
+
+            for (size_t k = 0u; k + 1u < found; k += 2u) {
+                double xa = crossings[k], xb = crossings[k + 1u];
+                if (!(xb > xa)) continue;
+                int sx = clip_lo(xa, bx0, bx1);
+                int ex = clip_hi(xb, bx0, bx1);
+                for (int x = sx; x < ex; x++) {
+                    double l = xa > (double)x ? xa : (double)x;
+                    double r = xb < (double)x + 1.0 ? xb : (double)x + 1.0;
+                    if (r > l)
+                        row[(size_t)(x - bx0)] += (float)((r - l) * share);
+                }
+            }
+        }
+        blend_cov_row(c, y, bx0, bx1, row, rgb, alpha);
+    }
+
+    if (row != stack_row) free(row);
+    if (crossings != stack_crossings) free(crossings);
+}
+
+/* Signed distance to a rounded rectangle: negative inside, zero on the
+ * outline.  ex/ey are half-extents and r is already clamped. */
+static float round_rect_sd(float px, float py, float cx, float cy,
+                           float ex, float ey, float r)
+{
+    float qx = fabsf(px - cx) - (ex - r);
+    float qy = fabsf(py - cy) - (ey - r);
+    float mx = qx > 0.0f ? qx : 0.0f;
+    float my = qy > 0.0f ? qy : 0.0f;
+    float outer = sqrtf(mx * mx + my * my);
+    float inner = fmaxf(qx, qy);
+    if (inner > 0.0f) inner = 0.0f;
+    return outer + inner - r;
+}
+
+/* Shared driver for the two rounded-rectangle calls.  band < 0 fills the
+ * interior; band >= 0 keeps a stroke of that half-width around the outline. */
+static void round_rect_shape(sr_canvas *c, float x, float y, float w, float h,
+                             float r, float band, uint32_t rgb, float alpha)
+{
+    if (!canvas_ok(c) || !isfinite(x) || !isfinite(y) ||
+        !isfinite(w) || !isfinite(h) || !isfinite(r) || !isfinite(band) ||
+        !(alpha > 0.0f) || !(w > 0.0f) || !(h > 0.0f)) return;
+
+    float ex = w * 0.5f, ey = h * 0.5f;
+    float cx = x + ex, cy = y + ey;
+    float rr = r;
+    if (!(rr > 0.0f)) rr = 0.0f;
+    rr = fminf(rr, fminf(ex, ey));
+
+    float pad = (band > 0.0f ? band : 0.0f) + 1.0f;
+    int bx0 = clip_lo((double)(cx - ex - pad), c->clip_x0, c->clip_x1);
+    int bx1 = clip_hi((double)(cx + ex + pad), c->clip_x0, c->clip_x1);
+    int by0 = clip_lo((double)(cy - ey - pad), c->clip_y0, c->clip_y1);
+    int by1 = clip_hi((double)(cy + ey + pad), c->clip_y0, c->clip_y1);
+
+    for (int py = by0; py < by1; py++) {
+        for (int px = bx0; px < bx1; px++) {
+            float d = round_rect_sd((float)px + 0.5f, (float)py + 0.5f,
+                                    cx, cy, ex, ey, rr);
+            float cov = band < 0.0f ? sat(0.5f - d)
+                                    : sat(0.5f - (fabsf(d) - band));
+            if (cov > 0.0f) blend_px_unchecked(c, px, py, rgb, alpha * cov);
+        }
+    }
+}
+
+void sr_fill_round_rect(sr_canvas *c, float x, float y, float w, float h,
+                        float r, uint32_t rgb, float alpha)
+{
+    round_rect_shape(c, x, y, w, h, r, -1.0f, rgb, alpha);
+}
+
+void sr_stroke_round_rect(sr_canvas *c, float x, float y, float w, float h,
+                          float r, float line, uint32_t rgb, float alpha)
+{
+    float band = line * 0.5f;
+    if (!(band > 0.5f)) band = 0.5f;
+    round_rect_shape(c, x, y, w, h, r, band, rgb, alpha);
+}
+
+typedef struct cubic_sink {
+    float *xs;
+    float *ys;
+    size_t capacity;
+    size_t count;
+} cubic_sink;
+
+static void cubic_emit(cubic_sink *s, float x, float y)
+{
+    if (s->count < s->capacity) {
+        s->xs[s->count] = x;
+        s->ys[s->count] = y;
+    }
+    if (s->count < SIZE_MAX) s->count++;
+}
+
+/* AGG's flatness test: subdivide while the control points sit further than
+ * the tolerance from the chord.  The comparison is scaled by the squared
+ * chord length so no square root is needed. */
+static void flatten_cubic(cubic_sink *s, float x0, float y0,
+                          float x1, float y1, float x2, float y2,
+                          float x3, float y3, float tol2, int depth)
+{
+    float dx = x3 - x0, dy = y3 - y0;
+    float d1 = fabsf((x1 - x3) * dy - (y1 - y3) * dx);
+    float d2 = fabsf((x2 - x3) * dy - (y2 - y3) * dx);
+    float dd = d1 + d2;
+
+    if (depth >= SR_CUBIC_MAX_DEPTH ||
+        dd * dd <= tol2 * (dx * dx + dy * dy)) {
+        cubic_emit(s, x3, y3);
+        return;
+    }
+
+    float x01 = (x0 + x1) * 0.5f, y01 = (y0 + y1) * 0.5f;
+    float x12 = (x1 + x2) * 0.5f, y12 = (y1 + y2) * 0.5f;
+    float x23 = (x2 + x3) * 0.5f, y23 = (y2 + y3) * 0.5f;
+    float xa = (x01 + x12) * 0.5f, ya = (y01 + y12) * 0.5f;
+    float xb = (x12 + x23) * 0.5f, yb = (y12 + y23) * 0.5f;
+    float xm = (xa + xb) * 0.5f, ym = (ya + yb) * 0.5f;
+
+    flatten_cubic(s, x0, y0, x01, y01, xa, ya, xm, ym, tol2, depth + 1);
+    flatten_cubic(s, xm, ym, xb, yb, x23, y23, x3, y3, tol2, depth + 1);
+}
+
+size_t sr_flatten_cubic(float x0, float y0, float x1, float y1,
+                        float x2, float y2, float x3, float y3,
+                        float tolerance, float *xs, float *ys, size_t capacity)
+{
+    if (!isfinite(x0) || !isfinite(y0) || !isfinite(x1) || !isfinite(y1) ||
+        !isfinite(x2) || !isfinite(y2) || !isfinite(x3) || !isfinite(y3))
+        return 0u;
+    if (capacity > 0u && (xs == NULL || ys == NULL)) return 0u;
+
+    float tol = tolerance;
+    if (!(tol >= 0.03125f)) tol = 0.03125f;
+
+    cubic_sink sink = { xs, ys, capacity, 0u };
+    cubic_emit(&sink, x0, y0);
+    flatten_cubic(&sink, x0, y0, x1, y1, x2, y2, x3, y3, tol * tol, 0);
+    return sink.count;
+}
+
 /* ------------------------------------------------------------------ text */
 
 static int text_width_for(size_t length, int advance, int scale)

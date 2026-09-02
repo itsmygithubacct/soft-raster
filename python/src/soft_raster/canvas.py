@@ -127,6 +127,29 @@ def _font(value: Font | int) -> Font:
         raise ValueError("font must be Font.FIXED_8X16 or Font.COMPACT_7X14") from error
 
 
+class Cap(IntEnum):
+    """End treatment for the free ends of a stroked polyline."""
+
+    ROUND = 0
+    BUTT = 1
+    SQUARE = 2
+
+
+def _cap(value: "Cap | int") -> "Cap":
+    try:
+        return Cap(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError("cap must be Cap.ROUND, Cap.BUTT or Cap.SQUARE") from error
+
+
+def _require_graph_primitives(native: SoftRasterLibrary) -> None:
+    if not native.supports_graph_primitives:
+        raise IncompatibleLibraryError(
+            f"{native.path} does not export the graph-primitive API; "
+            "soft-raster 0.5 or a compatible later API is required"
+        )
+
+
 def _require_selectable_fonts(native: SoftRasterLibrary) -> None:
     if not native.supports_selectable_fonts:
         raise IncompatibleLibraryError(
@@ -197,6 +220,46 @@ def _text_bytes(value: str | bytes) -> bytes:
     return "".join(
         character if 32 <= ord(character) <= 126 else "?" for character in value
     ).encode("ascii")
+
+
+def flatten_cubic(
+    x0: float,
+    y0: float,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    x3: float,
+    y3: float,
+    tolerance: float = 0.25,
+    *,
+    library: SoftRasterLibrary | None = None,
+) -> list[Point]:
+    """Flatten a cubic Bezier into points for :meth:`Canvas.polyline`.
+
+    Subdivision is adaptive: a nearly straight curve costs two points and a
+    tight one costs as many as it needs, up to 1025.  ``tolerance`` is the
+    permitted deviation in pixels and is clamped to at least 1/32.
+    """
+
+    native = _library(library)
+    _require_graph_primitives(native)
+    arguments = [
+        _floating(value, name, coordinate=True)
+        for value, name in (
+            (x0, "x0"), (y0, "y0"), (x1, "x1"), (y1, "y1"),
+            (x2, "x2"), (y2, "y2"), (x3, "x3"), (y3, "y3"),
+        )
+    ]
+    arguments.append(_floating(tolerance, "tolerance", coordinate=True))
+    needed = int(native.raw.sr_flatten_cubic(*arguments, None, None, 0))
+    if needed == 0:
+        return []
+    array_type = ctypes.c_float * needed
+    xs = array_type()
+    ys = array_type()
+    written = int(native.raw.sr_flatten_cubic(*arguments, xs, ys, needed))
+    return [(float(xs[i]), float(ys[i])) for i in range(min(written, needed))]
 
 
 def text_width(
@@ -824,6 +887,160 @@ class Canvas:
             _floating(alpha, "alpha"),
         )
         return self
+
+
+    def polyline(
+        self,
+        points: Iterable[Sequence[float]],
+        width: float,
+        value: ColorLike,
+        alpha: float = 1.0,
+        dash_on: int = 0,
+        dash_off: int = 0,
+        dash_offset: float = 0.0,
+        cap: "Cap | int" = Cap.ROUND,
+    ) -> "Canvas":
+        """Stroke a chain of segments as one shape.
+
+        Calling :meth:`line` once per segment blends the shared vertex twice --
+        at alpha 0.5 a plain pixel lands on 127 and the joint on 191 -- and
+        restarts the dash phase at every vertex.  This blends each pixel once,
+        gives interior vertices round joins, and measures the dash phase along
+        the whole path plus ``dash_offset``.
+
+        ``cap`` applies only to the two free ends.  Repeat the first point last
+        to close the outline, which makes both ends interior.
+        """
+        self._require_open()
+        _require_graph_primitives(self._library)
+        xs, ys, count = self._point_arrays(points, minimum=2)
+        self._library.raw.sr_polyline(
+            ctypes.byref(self._canvas),
+            xs,
+            ys,
+            count,
+            _floating(width, "width", coordinate=True),
+            color(value),
+            _floating(alpha, "alpha"),
+            _integer(dash_on, "dash_on", 0, INT_MAX),
+            _integer(dash_off, "dash_off", 0, INT_MAX),
+            _floating(dash_offset, "dash_offset", coordinate=True),
+            int(_cap(cap)),
+        )
+        return self
+
+    def fill_polygon_aa(
+        self,
+        points: Iterable[Sequence[float]],
+        value: ColorLike,
+        alpha: float = 1.0,
+    ) -> "Canvas":
+        """Fill a polygon with anti-aliased edges.
+
+        :meth:`fill_polygon` and :meth:`fill_triangle` sample the pixel center,
+        so their coverage is only ever 0 or 255.  Beside a :meth:`fill_circle`,
+        whose rim carries the values in between, that reads as a defect -- which
+        is exactly the pairing an arrowhead on an edge into a round node makes.
+        Costs about four times :meth:`fill_polygon`.
+        """
+        self._require_open()
+        _require_graph_primitives(self._library)
+        xs, ys, count = self._point_arrays(points, minimum=3)
+        self._library.raw.sr_fill_polygon_aa(
+            ctypes.byref(self._canvas),
+            xs,
+            ys,
+            count,
+            color(value),
+            _floating(alpha, "alpha"),
+        )
+        return self
+
+    def fill_round_rect(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        radius: float,
+        value: ColorLike,
+        alpha: float = 1.0,
+    ) -> "Canvas":
+        """Fill a rounded rectangle, both edges anti-aliased.
+
+        ``radius`` is clamped to half the smaller side; zero draws square
+        corners.
+        """
+        self._require_open()
+        _require_graph_primitives(self._library)
+        self._library.raw.sr_fill_round_rect(
+            ctypes.byref(self._canvas),
+            _floating(x, "x", coordinate=True),
+            _floating(y, "y", coordinate=True),
+            _floating(w, "w", coordinate=True),
+            _floating(h, "h", coordinate=True),
+            _floating(radius, "radius", coordinate=True),
+            color(value),
+            _floating(alpha, "alpha"),
+        )
+        return self
+
+    def stroke_round_rect(
+        self,
+        x: float,
+        y: float,
+        w: float,
+        h: float,
+        radius: float,
+        line: float,
+        value: ColorLike,
+        alpha: float = 1.0,
+    ) -> "Canvas":
+        """Stroke a rounded rectangle, centered on the outline.
+
+        Unlike :meth:`stroke_rect`, whose bars sit inside the rectangle, this
+        straddles the outline the way :meth:`ring` does.
+        """
+        self._require_open()
+        _require_graph_primitives(self._library)
+        self._library.raw.sr_stroke_round_rect(
+            ctypes.byref(self._canvas),
+            _floating(x, "x", coordinate=True),
+            _floating(y, "y", coordinate=True),
+            _floating(w, "w", coordinate=True),
+            _floating(h, "h", coordinate=True),
+            _floating(radius, "radius", coordinate=True),
+            _floating(line, "line", coordinate=True),
+            color(value),
+            _floating(alpha, "alpha"),
+        )
+        return self
+
+    def _point_arrays(
+        self, points: Iterable[Sequence[float]], *, minimum: int
+    ) -> tuple[Any, Any, int]:
+        coordinates: list[Point] = []
+        for index, point in enumerate(points):
+            try:
+                x, y = point
+            except (TypeError, ValueError) as error:
+                raise ValueError(
+                    f"point {index} must contain exactly x and y"
+                ) from error
+            coordinates.append(
+                (
+                    _floating(x, f"points[{index}].x", coordinate=True),
+                    _floating(y, f"points[{index}].y", coordinate=True),
+                )
+            )
+        if len(coordinates) < minimum:
+            raise ValueError(f"at least {minimum} points are required")
+        array_type = ctypes.c_float * len(coordinates)
+        return (
+            array_type(*(point[0] for point in coordinates)),
+            array_type(*(point[1] for point in coordinates)),
+            len(coordinates),
+        )
 
     def _draw_text(
         self,

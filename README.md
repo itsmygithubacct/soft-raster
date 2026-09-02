@@ -124,6 +124,36 @@ between pixel centers receive fractional-coverage anti-aliasing.
   scanlines. Winding-independent, half-open spans so adjacent polygons tile
   without a seam, and cheaper than `sr_fill_convex` on any polygon of size.
 
+### Graph primitives
+
+Four additions for drawing graphs, diagrams and charts, where a shape is a
+*chain* of segments rather than one, and where hard polygon edges sit next to
+anti-aliased circles.
+
+- `sr_polyline` — strokes a whole chain as one shape. Stroking a chain with
+  one `sr_line` per segment is wrong twice over: each call blends
+  independently, so a shared vertex is blended twice (at alpha 0.5 a plain
+  pixel lands on 127 and the joint on 191, a dark bead at every bend), and the
+  dash phase restarts at every vertex. `sr_polyline` takes coverage as the
+  maximum over the segments, so every pixel blends once and interior vertices
+  become round joins, and it measures the dash phase along the whole path plus
+  a `dash_offset`. Two points with `SR_CAP_ROUND` and no dash draw exactly what
+  `sr_line` draws. Caps (`SR_CAP_ROUND`, `SR_CAP_BUTT`, `SR_CAP_SQUARE`) apply
+  only to the two free ends.
+- `sr_fill_polygon_aa` — the anti-aliased sibling of `sr_fill_polygon`. The
+  center-sampling fills produce coverage of 0 or 255 and nothing between, which
+  reads as a defect beside `sr_fill_circle`'s smooth rim — exactly the pairing
+  an arrowhead on an edge into a round node makes. Four sub-scanlines per row
+  with exact horizontal span overlap, at about four times the cost.
+- `sr_fill_round_rect` / `sr_stroke_round_rect` — the default node shape of
+  every modern diagram, and the one shape that cannot be assembled from the
+  existing primitives without seams where the bars meet the corner arcs.
+  Coverage comes from the exact signed distance, so both edges are
+  anti-aliased. The stroke is centered on the outline, like `sr_ring`.
+- `sr_flatten_cubic` — adaptive subdivision of a cubic Bézier into points for
+  `sr_polyline`, so a routed edge can be a curve. Call it with capacity 0 to
+  size a buffer; the result is bounded by 1025 points.
+
 ## Text
 
 `sr_text`, `sr_text_center`, `sr_text_outlined`, and `sr_text_shadow` retain
