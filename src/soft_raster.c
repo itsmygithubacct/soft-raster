@@ -1564,8 +1564,9 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
     }
 }
 
-void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
-                    int w, int h, float alpha)
+static void blit_scaled_pair(sr_canvas *dst, const sr_canvas *src,
+                             const sr_canvas *second, unsigned int weight,
+                             int x, int y, int w, int h, float alpha)
 {
     int dx0;
     int dy0;
@@ -1613,6 +1614,18 @@ void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
         for (int dx = dx0; dx < dx1; dx++) {
             uint32_t s = src->px[(size_t)source_y * (size_t)src->w +
                                  (size_t)sx];
+            if (second != NULL) {
+                const uint32_t t = second->px[(size_t)source_y *
+                                               (size_t)second->w + (size_t)sx];
+                const unsigned int inverse = 256u - weight;
+                uint32_t mixed = 0u;
+                for (unsigned int shift = 0u; shift < 32u; shift += 8u) {
+                    const uint32_t channel = (((s >> shift) & 255u) * inverse +
+                        ((t >> shift) & 255u) * weight + 128u) >> 8;
+                    mixed |= channel << shift;
+                }
+                s = mixed;
+            }
             composite_px(&dst->px[(size_t)(y + dy) * (size_t)dst->w +
                                   (size_t)(x + dx)], s, ga);
             sx += source_x_step;
@@ -1629,6 +1642,27 @@ void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
             y_error -= h;
         }
     }
+}
+
+void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
+                    int w, int h, float alpha)
+{
+    blit_scaled_pair(dst, src, NULL, 0u, x, y, w, h, alpha);
+}
+
+void sr_blit_scaled_mix(sr_canvas *dst, const sr_canvas *first,
+                        const sr_canvas *second, int x, int y, int w, int h,
+                        float mix, float alpha)
+{
+    if (!canvas_ok(dst) || !canvas_ok(first) || !canvas_ok(second) ||
+        first->w != second->w || first->h != second->h ||
+        dst->px == first->px || dst->px == second->px) return;
+    const unsigned int weight = (unsigned int)(clampf(mix, 0.0f, 1.0f) * 256.0f + 0.5f);
+    if (weight == 0u || weight == 256u || first->px == second->px) {
+        sr_blit_scaled(dst, weight == 256u ? second : first, x, y, w, h, alpha);
+        return;
+    }
+    blit_scaled_pair(dst, first, second, weight, x, y, w, h, alpha);
 }
 
 void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,

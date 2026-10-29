@@ -172,6 +172,9 @@ string widths, and bitmap rows are available through `sr_font_advance()`,
   using source alpha purely as a mask.
 - `sr_blit_scaled` — nearest-neighbor resample into a destination
   rectangle, composited like `sr_blit_alpha`.
+- `sr_blit_scaled_mix` — crossfade two equally sized premultiplied sprites
+  before compositing once. Shared opaque regions stay opaque throughout the
+  transition. It uses no intermediate canvas and performs no allocation.
 - `sr_blit_transformed` — whole-source alpha composite with any combination
   of horizontal, vertical, and diagonal-exchange flags. Diagonal exchange
   runs first and swaps the output dimensions; optional tint uses source alpha

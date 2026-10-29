@@ -899,6 +899,37 @@ test_blit_transformed_all_combinations(void)
     return true;
 }
 
+static bool test_blit_scaled_mix(void)
+{
+    sr_canvas a, b, dst, expected;
+    CHECK(sr_canvas_init(&a, 2, 1));
+    CHECK(sr_canvas_init(&b, 2, 1));
+    CHECK(sr_canvas_init(&dst, 8, 4));
+    CHECK(sr_canvas_init(&expected, 8, 4));
+    a.px[0] = 0xffff0000u; a.px[1] = 0x80800000u;
+    b.px[0] = 0xff0000ffu; b.px[1] = 0x80000080u;
+    sr_clear(&dst, 0x00ff00u);
+    sr_blit_scaled_mix(&dst, &a, &b, 0, 0, 4, 2, 0.5f, 1.0f);
+    CHECK(dst.px[0] == 0xff800080u); /* Opaque crossfade hides the background. */
+    CHECK(dst.px[2] == 0xff407f40u); /* Premultiplied half-alpha blends once. */
+    for (unsigned int edge = 0u; edge < 2u; ++edge) {
+        sr_clear(&dst, 0x173349u); sr_clear(&expected, 0x173349u);
+        sr_blit_scaled_mix(&dst, &a, &b, -1, -1, 7, 3, (float)edge, 0.6f);
+        sr_blit_scaled(&expected, edge == 0u ? &a : &b, -1, -1, 7, 3, 0.6f);
+        CHECK(memcmp(dst.px, expected.px, 8u * 4u * 4u) == 0);
+    }
+    sr_clear(&dst, 0u);
+    sr_blit_scaled_mix(&dst, &a, &b, INT_MIN, INT_MAX, INT_MAX, INT_MAX, 0.5f, 1.0f);
+    CHECK(dst.px[0] == 0xff000000u);
+    sr_blit_scaled_mix(&dst, &a, &b, 0, 0, 2, 1, NAN, 1.0f);
+    CHECK(dst.px[0] == a.px[0]);
+    sr_blit_scaled_mix(&a, &a, &b, 0, 0, 2, 1, 0.5f, 1.0f);
+    CHECK(a.px[0] == 0xffff0000u); /* Aliased storage is a no-op. */
+    sr_canvas_free(&a); sr_canvas_free(&b);
+    sr_canvas_free(&dst); sr_canvas_free(&expected);
+    return true;
+}
+
 static bool
 test_blit_transformed_composition_and_clipping(void)
 {
@@ -1612,6 +1643,7 @@ main(void)
         {"overlapping blit", test_overlapping_blit},
         {"blit alpha and tint", test_blit_alpha_and_tint},
         {"scaled blit dimensions", test_blit_scaled_dimensions},
+        {"scaled sprite crossfade", test_blit_scaled_mix},
         {"transformed blit combinations", test_blit_transformed_all_combinations},
         {"transformed blit composition and clipping",
          test_blit_transformed_composition_and_clipping},

@@ -369,6 +369,14 @@ void sr_blit_tint(sr_canvas *dst, const sr_canvas *src, int x, int y,
                   uint32_t rgb, float alpha);
 void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
                     int w, int h, float alpha);
+/* Crossfade two equally sized premultiplied sprites, then composite once.
+ * Unlike two translucent blits, an opaque region stays opaque throughout
+ * the transition. No intermediate canvas or allocation is needed. mix=0
+ * selects first, mix=1 selects second; NaN selects first. The geometry,
+ * alpha and non-overlap requirements are the same as sr_blit_scaled(). */
+void sr_blit_scaled_mix(sr_canvas *dst, const sr_canvas *first,
+                        const sr_canvas *second, int x, int y, int w, int h,
+                        float mix, float alpha);
 void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
                          uint8_t transform, float alpha, bool tint_enabled,
                          uint32_t rgb);

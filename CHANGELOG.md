@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+- Add allocation-free `sr_blit_scaled_mix` for crossfading equally sized
+  premultiplied sprites before compositing them once. Opaque shared regions
+  stay opaque throughout the transition, without showing the background
+  through two independently faded layers.
+
 - Add `sr_polyline()`, which strokes a chain of segments as one shape. Stroking
   a chain with one `sr_line()` per segment blends each shared vertex twice —
   measured at alpha 0.5, a plain segment pixel lands on 127 and the joint on
