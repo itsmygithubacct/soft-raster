@@ -175,6 +175,11 @@ string widths, and bitmap rows are available through `sr_font_advance()`,
 - `sr_blit_scaled_mix` — crossfade two equally sized premultiplied sprites
   before compositing once. Shared opaque regions stay opaque throughout the
   transition. It uses no intermediate canvas and performs no allocation.
+- `sr_blit_mesh_mix` — align two textures to corresponding UV coordinates on
+  a shared triangle mesh, bilinearly sample, mix, and composite once. Shared
+  edges use a top-left rule to avoid seams or repeated alpha blending. The
+  allocation-free scanline renderer respects the canvas clip and rejects
+  invalid geometry or indices before drawing.
 - `sr_blit_transformed` — whole-source alpha composite with any combination
   of horizontal, vertical, and diagonal-exchange flags. Diagonal exchange
   runs first and swaps the output dimensions; optional tint uses source alpha

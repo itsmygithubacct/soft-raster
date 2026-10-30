@@ -1665,6 +1665,138 @@ void sr_blit_scaled_mix(sr_canvas *dst, const sr_canvas *first,
     blit_scaled_pair(dst, first, second, weight, x, y, w, h, alpha);
 }
 
+static uint32_t mix_premultiplied(uint32_t a, uint32_t b, unsigned int weight)
+{
+    /* Two lanes at a time; each weighted channel fits in sixteen bits. */
+    const uint32_t rb = (((a & 0x00ff00ffu) * (256u - weight) +
+                          (b & 0x00ff00ffu) * weight + 0x00800080u) >> 8) & 0x00ff00ffu;
+    const uint32_t ag = ((((a >> 8) & 0x00ff00ffu) * (256u - weight) +
+                          ((b >> 8) & 0x00ff00ffu) * weight + 0x00800080u)) & 0xff00ff00u;
+    return rb | ag;
+}
+
+static uint32_t mesh_sample(const sr_canvas *src, double u, double v)
+{
+    double sx = u * src->w - 0.5, sy = v * src->h - 0.5;
+    sx = sx < 0.0 ? 0.0 : sx > (double)src->w - 1.0 ? (double)src->w - 1.0 : sx;
+    sy = sy < 0.0 ? 0.0 : sy > (double)src->h - 1.0 ? (double)src->h - 1.0 : sy;
+    const int x = (int)sx, y = (int)sy;
+    const int right = x + 1 < src->w ? x + 1 : x;
+    const int bottom = y + 1 < src->h ? y + 1 : y;
+    const unsigned int wx = (unsigned int)((sx - x) * 256.0 + 0.5);
+    const unsigned int wy = (unsigned int)((sy - y) * 256.0 + 0.5);
+    const uint32_t a = mix_premultiplied(src->px[(size_t)y * (size_t)src->w + (size_t)x],
+        src->px[(size_t)y * (size_t)src->w + (size_t)right], wx);
+    const uint32_t b = mix_premultiplied(src->px[(size_t)bottom * (size_t)src->w + (size_t)x],
+        src->px[(size_t)bottom * (size_t)src->w + (size_t)right], wx);
+    return mix_premultiplied(a, b, wy);
+}
+
+typedef struct mesh_edge { double x, y, c; bool inclusive; } mesh_edge;
+
+static mesh_edge mesh_edge_make(const sr_mesh_vertex *a, const sr_mesh_vertex *b)
+{
+    return (mesh_edge){(double)a->y - b->y, (double)b->x - a->x,
+        (double)a->x * b->y - (double)a->y * b->x,
+        b->y < a->y || (b->y == a->y && b->x > a->x)};
+}
+
+void sr_blit_mesh_mix(sr_canvas *dst, const sr_canvas *first,
+                      const sr_canvas *second, const sr_mesh_vertex *vertices,
+                      size_t vertex_count, const uint16_t *indices,
+                      size_t triangle_count, float mix, float alpha)
+{
+    if (!canvas_ok(dst) || !canvas_ok(first) || !canvas_ok(second) ||
+        vertices == NULL || indices == NULL || vertex_count == 0u ||
+        vertex_count > 65536u || triangle_count > SIZE_MAX / 3u ||
+        dst->px == first->px || dst->px == second->px || !(alpha > 0.0f)) return;
+    for (size_t i = 0u; i < vertex_count; ++i) {
+        const sr_mesh_vertex *p = &vertices[i];
+        if (!isfinite(p->x) || !isfinite(p->y) || !isfinite(p->u0) ||
+            !isfinite(p->v0) || !isfinite(p->u1) || !isfinite(p->v1)) return;
+    }
+    for (size_t i = 0u; i < triangle_count * 3u; ++i)
+        if (indices[i] >= vertex_count) return;
+    const int ga = (int)(clampf(alpha, 0.0f, 1.0f) * 255.0f + 0.5f);
+    const unsigned int weight = (unsigned int)(clampf(mix, 0.0f, 1.0f) * 256.0f + 0.5f);
+    if (ga <= 0) return;
+    for (size_t triangle = 0u; triangle < triangle_count; ++triangle) {
+        const sr_mesh_vertex *a = &vertices[indices[triangle * 3u]];
+        const sr_mesh_vertex *b = &vertices[indices[triangle * 3u + 1u]];
+        const sr_mesh_vertex *c = &vertices[indices[triangle * 3u + 2u]];
+        double area = ((double)b->x - a->x) * ((double)c->y - a->y) -
+                      ((double)b->y - a->y) * ((double)c->x - a->x);
+        if (area == 0.0) continue;
+        if (area < 0.0) {
+            const sr_mesh_vertex *swap = b; b = c; c = swap; area = -area;
+        }
+        const int x0 = clip_lo(fmin(a->x, fmin(b->x, c->x)), dst->clip_x0, dst->clip_x1);
+        const int x1 = clip_hi(fmax(a->x, fmax(b->x, c->x)), dst->clip_x0, dst->clip_x1);
+        const int y0 = clip_lo(fmin(a->y, fmin(b->y, c->y)), dst->clip_y0, dst->clip_y1);
+        const int y1 = clip_hi(fmax(a->y, fmax(b->y, c->y)), dst->clip_y0, dst->clip_y1);
+        const mesh_edge edges[3] = {mesh_edge_make(b, c), mesh_edge_make(c, a), mesh_edge_make(a, b)};
+        const double du0 = (edges[1].x * ((double)b->u0 - a->u0) + edges[2].x * ((double)c->u0 - a->u0)) / area;
+        const double dv0 = (edges[1].x * ((double)b->v0 - a->v0) + edges[2].x * ((double)c->v0 - a->v0)) / area;
+        const double du1 = (edges[1].x * ((double)b->u1 - a->u1) + edges[2].x * ((double)c->u1 - a->u1)) / area;
+        const double dv1 = (edges[1].x * ((double)b->v1 - a->v1) + edges[2].x * ((double)c->v1 - a->v1)) / area;
+        for (int y = y0; y < y1; ++y) {
+            int left = x0, right = x1;
+            double row[3];
+            /* Intersect the three edge half-planes once per scanline.
+             * Only its endpoints need edge checks, not every shaded pixel. */
+            for (unsigned int i = 0u; i < 3u; ++i) {
+                row[i] = edges[i].y * ((double)y + 0.5) + edges[i].c;
+                if (edges[i].x == 0.0) {
+                    if (row[i] < 0.0 || (row[i] == 0.0 && !edges[i].inclusive)) right = left;
+                } else {
+                    const double boundary = -row[i] / edges[i].x - 0.5;
+                    if (edges[i].x > 0.0) {
+                        const int bound = clip_lo(boundary, x0, x1);
+                        if (bound > left) left = bound;
+                    } else {
+                        const int bound = clip_hi(boundary + 1.0, x0, x1);
+                        if (bound < right) right = bound;
+                    }
+                }
+            }
+            while (left < right) {
+                bool inside = true;
+                for (unsigned int i = 0u; i < 3u; ++i) {
+                    const double e = edges[i].x * ((double)left + 0.5) + row[i];
+                    if (e < 0.0 || (e == 0.0 && !edges[i].inclusive)) inside = false;
+                }
+                if (inside) break;
+                ++left;
+            }
+            while (right > left) {
+                bool inside = true;
+                for (unsigned int i = 0u; i < 3u; ++i) {
+                    const double e = edges[i].x * ((double)right - 0.5) + row[i];
+                    if (e < 0.0 || (e == 0.0 && !edges[i].inclusive)) inside = false;
+                }
+                if (inside) break;
+                --right;
+            }
+            const double wb = (edges[1].x * ((double)left + 0.5) + row[1]) / area;
+            const double wc = (edges[2].x * ((double)left + 0.5) + row[2]) / area;
+            double u0 = a->u0 + wb * ((double)b->u0 - a->u0) + wc * ((double)c->u0 - a->u0);
+            double v0 = a->v0 + wb * ((double)b->v0 - a->v0) + wc * ((double)c->v0 - a->v0);
+            double u1 = a->u1 + wb * ((double)b->u1 - a->u1) + wc * ((double)c->u1 - a->u1);
+            double v1 = a->v1 + wb * ((double)b->v1 - a->v1) + wc * ((double)c->v1 - a->v1);
+            for (int x = left; x < right; ++x) {
+                uint32_t pixel;
+                if (weight == 256u) pixel = mesh_sample(second, u1, v1);
+                else {
+                    pixel = mesh_sample(first, u0, v0);
+                    if (weight != 0u) pixel = mix_premultiplied(pixel, mesh_sample(second, u1, v1), weight);
+                }
+                composite_px(&dst->px[(size_t)y * (size_t)dst->w + (size_t)x], pixel, ga);
+                u0 += du0; v0 += dv0; u1 += du1; v1 += dv1;
+            }
+        }
+    }
+}
+
 void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
                          uint8_t transform, float alpha, bool tint_enabled,
                          uint32_t rgb)

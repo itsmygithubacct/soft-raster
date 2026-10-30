@@ -930,6 +930,75 @@ static bool test_blit_scaled_mix(void)
     return true;
 }
 
+static bool test_mesh_alignment_and_edges(void)
+{
+    sr_canvas a, b, dst;
+    CHECK(sr_canvas_init(&a, 8, 8));
+    CHECK(sr_canvas_init(&b, 8, 8));
+    CHECK(sr_canvas_init(&dst, 8, 8));
+    const uint16_t indices[] = {0, 1, 2, 0, 2, 3};
+    sr_mesh_vertex points[] = {
+        {0, 0, 0, 0, 0, 0}, {8, 0, 1, 0, 1, 0},
+        {8, 8, 1, 1, 1, 1}, {0, 8, 0, 1, 0, 1}
+    };
+    /* Every pixel on the diagonal gets exactly one translucent composite. */
+    for (unsigned int i = 0; i < 64u; ++i) a.px[i] = 0x80800000u;
+    for (unsigned int i = 0; i < 64u; ++i) b.px[i] = 0x80000080u;
+    sr_clear(&dst, 0x00ff00u);
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, indices, 2u, 0.5f, 1.0f);
+    for (unsigned int i = 0; i < 64u; ++i) CHECK(dst.px[i] == 0xff407f40u);
+    /* A displaced internal junction exercises fractional, sloping shared
+     * edges. Neither cracks nor twice-blended pixels may appear. */
+    sr_mesh_vertex fan[] = {
+        {0, 0, 0, 0, 0, 0}, {8, 0, 1, 0, 1, 0},
+        {8, 8, 1, 1, 1, 1}, {0, 8, 0, 1, 0, 1},
+        {3.25f, 4.75f, 0.5f, 0.5f, 0.5f, 0.5f}
+    };
+    const uint16_t fan_indices[] = {0, 1, 4, 1, 2, 4, 2, 3, 4, 3, 0, 4};
+    sr_clear(&dst, 0x00ff00u);
+    sr_blit_mesh_mix(&dst, &a, &b, fan, 5u, fan_indices, 4u, 0.5f, 1.0f);
+    for (unsigned int i = 0; i < 64u; ++i) CHECK(dst.px[i] == 0xff407f40u);
+    /* Reversed winding produces the same coverage. */
+    const uint16_t reversed[] = {2, 1, 0, 3, 2, 0};
+    sr_clear(&dst, 0x00ff00u);
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, reversed, 2u, 0.5f, 1.0f);
+    for (unsigned int i = 0; i < 64u; ++i) CHECK(dst.px[i] == 0xff407f40u);
+    /* Corresponding black features at different source positions arrive at
+     * one output position instead of dissolving into two translucent marks. */
+    sr_clear(&a, 0xffffffu); sr_clear(&b, 0xffffffu);
+    for (int y = 0; y < 8; ++y) { sr_px(&a, 2, y, 0u); sr_px(&b, 4, y, 0u); }
+    for (unsigned int i = 0u; i < 4u; ++i) {
+        points[i].u0 -= 0.125f;
+        points[i].u1 += 0.125f;
+    }
+    sr_clear(&dst, 0x00ff00u);
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, indices, 2u, 0.5f, 1.0f);
+    for (int y = 0; y < 8; ++y)
+        for (int x = 0; x < 8; ++x) CHECK(px_at(&dst, x, y) == (x == 3 ? 0xff000000u : 0xffffffffu));
+    sr_clear(&dst, 0x123456u);
+    sr_canvas_set_clip(&dst, 2, 2, 3, 3);
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, indices, 2u, 1.0f, 1.0f);
+    CHECK(dst.px[0] == 0xff123456u && px_at(&dst, 3, 3) == 0xff000000u);
+    sr_clear(&dst, 0x123456u);
+    points[0].x = NAN;
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, indices, 2u, 0.5f, 1.0f);
+    CHECK(px_at(&dst, 3, 3) == 0xff123456u);
+    points[0].x = -FLT_MAX;
+    points[1].x = FLT_MAX;
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, indices, 2u, NAN, NAN);
+    CHECK(px_at(&dst, 3, 3) == 0xff123456u);
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, indices, 2u, 0.5f, 1.0f);
+    const uint16_t invalid[] = {0, 1, 4};
+    sr_clear(&dst, 0x123456u);
+    sr_blit_mesh_mix(&dst, &a, &b, points, 4u, invalid, 1u, 0.5f, 1.0f);
+    CHECK(px_at(&dst, 3, 3) == 0xff123456u);
+    const uint32_t before = a.px[0];
+    sr_blit_mesh_mix(&a, &a, &b, points, 4u, indices, 2u, 1.0f, 1.0f);
+    CHECK(a.px[0] == before);
+    sr_canvas_free(&a); sr_canvas_free(&b); sr_canvas_free(&dst);
+    return true;
+}
+
 static bool
 test_blit_transformed_composition_and_clipping(void)
 {
@@ -1644,6 +1713,7 @@ main(void)
         {"blit alpha and tint", test_blit_alpha_and_tint},
         {"scaled blit dimensions", test_blit_scaled_dimensions},
         {"scaled sprite crossfade", test_blit_scaled_mix},
+        {"mesh feature alignment and shared edges", test_mesh_alignment_and_edges},
         {"transformed blit combinations", test_blit_transformed_all_combinations},
         {"transformed blit composition and clipping",
          test_blit_transformed_composition_and_clipping},

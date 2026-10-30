@@ -377,6 +377,25 @@ void sr_blit_scaled(sr_canvas *dst, const sr_canvas *src, int x, int y,
 void sr_blit_scaled_mix(sr_canvas *dst, const sr_canvas *first,
                         const sr_canvas *second, int x, int y, int w, int h,
                         float mix, float alpha);
+/* A corresponding point on two textures and their shared output mesh.
+ * UV coordinates are normalized image-edge coordinates (0..1). */
+typedef struct sr_mesh_vertex {
+    float x, y;
+    float u0, v0, u1, v1;
+} sr_mesh_vertex;
+
+/* Warp two premultiplied images onto the SAME triangle mesh, mix their
+ * samples, then composite once. Bilinear sampling clamps at texture edges.
+ * Shared edges use a top-left fill rule, so a translucent mesh has no seams.
+ * Indices contain three vertex indices per triangle. Either winding works;
+ * degenerate triangles are skipped. Invalid indices/non-finite coordinates,
+ * aliased destination storage, or more than 65536 vertices make this a no-op.
+ * Respects the destination clip. No allocations or intermediate canvas.
+ * mix/alpha are clamped to [0,1]; NaN behaves as zero. */
+void sr_blit_mesh_mix(sr_canvas *dst, const sr_canvas *first,
+                      const sr_canvas *second, const sr_mesh_vertex *vertices,
+                      size_t vertex_count, const uint16_t *indices,
+                      size_t triangle_count, float mix, float alpha);
 void sr_blit_transformed(sr_canvas *dst, const sr_canvas *src, int x, int y,
                          uint8_t transform, float alpha, bool tint_enabled,
                          uint32_t rgb);

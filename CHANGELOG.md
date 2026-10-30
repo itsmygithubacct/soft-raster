@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Add allocation-free `sr_blit_mesh_mix` for bilinear, premultiplied texture
+  morphing on a corresponding triangle mesh, with scanline clipping, shared
+  edge ownership, finite-coordinate checks and validated indices.
 - Add allocation-free `sr_blit_scaled_mix` for crossfading equally sized
   premultiplied sprites before compositing them once. Opaque shared regions
   stay opaque throughout the transition, without showing the background
