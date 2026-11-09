@@ -18,6 +18,10 @@ fully clipped to the active canvas clip. Canvas creation allocates its pixel
 buffer, and polygons above 64 vertices allocate a temporary crossing array;
 ordinary drawing uses only canvas and stack memory.
 
+> This paragraph was written before poly-lines and anti-aliased fills grew their own
+> scratch buffers. Poly-lines above 128 points and anti-aliased fills or poly-lines
+> wider than 4096 pixels also allocate; the [README](../README.md) has the current list.
+
 ## Quick start
 
 ```c
