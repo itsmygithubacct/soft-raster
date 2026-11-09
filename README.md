@@ -1,195 +1,148 @@
 # soft-raster
 
-`soft-raster` is a small C11 software rasterizer for 32-bit framebuffers:
-anti-aliased primitives, two embedded bitmap fonts, sprite blits with
-per-pixel alpha, P6 PPM loading, and an aspect-preserving letterbox scaler.
+`soft-raster` is a small C11 software rasterizer that draws anti-aliased
+shapes, bitmap text and alpha sprites into 32-bit framebuffers.
 
-The code was extracted from the software renderer shared by the
-terminal-lander family of terminal games (`terminal_lander`,
-`kitty-brokeout`, `kilix-fishtank`, and friends), where the same block was
-duplicated at the top of every game's renderer. The blending math is kept
-identical, so frames drawn through this library match the original games
-byte for byte on an opaque canvas.
+It is not installed on its own. Kilix games and terminal apps pin it as a Git
+submodule (most of them through
+[kilix-game-sdk](https://github.com/itsmygithubacct/kilix-game-sdk#readme))
+and compile it into their binaries; those games and apps install on demand from
+the Kilix content catalog.
 
-The library is pure ISO C11 with no operating-system dependencies. Drawing is
-fully clipped to the active canvas clip. Canvas creation allocates its pixel
-buffer, and polygons above 64 vertices allocate a temporary crossing array;
-ordinary drawing uses only canvas and stack memory.
+## What it does
 
-## Build and test
-
-```sh
-make
-make test
-make sanitize
-make benchmark
-./build/demo
-```
-
-The final command renders a composed scene (gradient sky, anti-aliased
-circles and rings, dashed lines, outlined text, sprite blits, letterbox
-scaling) into `demo.ppm`. The test suite asserts exact pixel values for
-clipped stores, blend fixed-point math, edge coverage of rectangles,
-circles, rings, and dashed lines, glyph bits against the font table, blit
-clipping at all four edges, scaler geometry, and the PPM writer.
-
-The typed, pure-Python binding is maintained in [`python/`](python). It uses
-the same shared library without bundling a second native implementation:
-
-```sh
-make python-check
-make python-wheel
-make python-benchmark
-```
-
-The wheel is written below `python/dist/`.
+- Draws anti-aliased rectangles, circles, ellipses, rings, dashed lines,
+  triangles and convex or concave polygons, all clipped to a canvas clip rectangle.
+- Strokes poly-lines as one shape (round joins, chosen end caps, a dash phase
+  along the whole path), fills rounded rectangles and anti-aliased polygons, and
+  flattens cubic Bézier curves: the primitives a graph or diagram needs.
+- Renders text in an embedded 8x16 console font or a compact 7x14 face, with
+  centred, outlined and shadowed variants.
+- Composites premultiplied-alpha sprites (plain, tinted, scaled, flipped or
+  transposed) and letterbox-scales a whole canvas onto another.
+- Loads and writes binary P6 PPM files for small assets and golden-image tests.
+- Depends only on the C standard library and `libm`; nothing requires POSIX.
+- Ships a typed pure-Python binding over the same shared library in [`python/`](python/).
 
 ## Quick start
+
+```sh
+git clone https://github.com/itsmygithubacct/soft-raster.git
+cd soft-raster
+make            # build/libsoft-raster.a, build/libsoft-raster.so, build/demo
+make test       # exact-pixel test suites
+./build/demo    # writes demo.ppm
+```
 
 ```c
 #include "soft_raster.h"
 
 sr_canvas frame;
-if (!sr_canvas_init(&frame, 640, 360)) {
-    /* allocation failed or dimensions were invalid */
+if (sr_canvas_init(&frame, 640, 360)) {
+    sr_clear(&frame, 0x101018);
+    sr_fill_circle(&frame, 320.0f, 180.0f, 48.0f, 0xffd166, 1.0f);
+    sr_text_center(&frame, 320.0f, 24.0f, "HELLO", 0xf8fafc, 1.0f, 2);
+    sr_write_ppm(&frame, "frame.ppm");
+    sr_canvas_free(&frame);
 }
-
-sr_clear(&frame, 0x101018);
-sr_fill_circle(&frame, 320.0f, 180.0f, 48.0f, 0xffd166, 1.0f);
-sr_ring(&frame, 320.0f, 180.0f, 64.0f, 2.0f, 0x38bdf8, 0.6f);
-sr_line(&frame, 20.0f, 20.0f, 620.0f, 340.0f, 2.0f, 0xf8fafc, 0.8f, 6, 4);
-sr_text_center(&frame, 320.0f, 24.0f, "HELLO", 0xf8fafc, 1.0f, 2);
-
-sr_write_ppm(&frame, "frame.ppm");
-sr_canvas_free(&frame);
 ```
 
-An application that already owns a pixel buffer can draw into it without
-any allocation:
+An application can also compile `src/soft_raster.c` directly instead of linking
+the library.
 
-```c
-sr_canvas view;
-sr_canvas_wrap(&view, my_pixels, my_width, my_height);
-/* draw... */
-sr_canvas_free(&view);   /* never frees wrapped memory */
-```
+## Usage
 
-## Pixel format
+| Area | Main calls |
+|---|---|
+| Canvas | `sr_canvas_init`, `sr_canvas_wrap`, `sr_canvas_free`, `sr_canvas_set_clip`, `sr_canvas_reset_clip` |
+| Pixels and packing | `sr_clear`, `sr_px`, `sr_blend`, `sr_pack_rgba`, `sr_pack_rgb` |
+| Shapes | `sr_fill_rect`, `sr_stroke_rect`, `sr_fill_circle`, `sr_fill_ellipse`, `sr_ring`, `sr_line`, `sr_fill_triangle`, `sr_fill_convex`, `sr_fill_polygon` |
+| Graph primitives | `sr_polyline`, `sr_fill_polygon_aa`, `sr_fill_round_rect`, `sr_stroke_round_rect`, `sr_flatten_cubic` |
+| Text | `sr_text`, `sr_text_center`, `sr_text_outlined`, `sr_text_shadow`, the `sr_*_in` face-selecting variants, `sr_text_width_in` |
+| Blits and scaling | `sr_blit`, `sr_blit_alpha`, `sr_blit_tint`, `sr_blit_scaled`, `sr_blit_transformed`, `sr_scale_canvas` |
+| Files | `sr_load_ppm`, `sr_write_ppm` |
 
-A canvas is a row-major array of `uint32_t` pixels laid out as
-`0xAARRGGBB`:
+| Make target | What it does |
+|---|---|
+| `make` | static and shared libraries plus the demo |
+| `make test` | the raster and graph-primitive test suites |
+| `make sanitize` | both suites under AddressSanitizer and UndefinedBehaviorSanitizer |
+| `make benchmark` | the C microbenchmark |
+| `make python-check`, `make python-wheel`, `make python-benchmark` | the Python binding's checks, wheel and benchmark |
+| `make install PREFIX=/usr/local` | installs the header and both libraries |
 
-- Colors passed to drawing calls are `0x00RRGGBB`; the high byte of a color
-  argument is ignored. This is the same convention the games use, where
-  `0xRRGGBB` literals carry implicit opacity.
-- `sr_clear()` and `sr_px()` store the color with alpha `0xFF`.
-- `sr_blend()` and every primitive built on it quantize coverage to 1/256
-  steps, move each RGB channel toward the color by that coverage, and
-  saturate the alpha byte toward `0xFF` by the same coverage.
-- On a canvas that starts fully transparent (`sr_canvas_init()` zeroes its
-  pixels), drawing therefore builds a premultiplied-alpha sprite: RGB
-  carries color scaled by coverage and the high byte carries coverage.
-  `sr_blit_alpha()`, `sr_blit_tint()`, `sr_blit_scaled()`, and
-  `sr_blit_transformed()` composite such sprites over another canvas using
-  that per-pixel alpha, optionally multiplied by a uniform alpha.
+## How it works
 
-## Canvas
+A canvas is a row-major array of `uint32_t` pixels in `0xAARRGGBB` order,
+either allocated by `sr_canvas_init()` or wrapped around memory the caller
+already owns. Drawing calls take float pixel coordinates; an edge that falls
+between pixel centres gets fractional coverage, which is quantised to 1/256
+steps and blended toward the colour. Drawing on a transparent canvas therefore
+builds a premultiplied-alpha sprite, which the blit calls composite over another
+canvas.
 
-`sr_canvas_init()` allocates and zeroes a `w*h` canvas, rejecting
-non-positive dimensions and pixel counts that would overflow.
-`sr_canvas_wrap()` points a canvas at caller-owned memory without copying.
-`sr_canvas_free()` releases memory obtained from `sr_canvas_init()` and
-never frees wrapped memory. `sr_canvas_set_clip()` limits subsequent pixel and
-primitive drawing to a rectangle; `sr_canvas_reset_clip()` restores the full
-canvas. Initialize or wrap only an empty canvas, and free it before reusing the
-struct. `sr_pack_rgba()` and `sr_pack_rgb()` convert native pixels into
-presenter-friendly channel order.
+The code was extracted from the renderer the terminal-lander family of games
+used to duplicate in every game, with the blending maths kept identical, so
+frames match those games byte for byte on an opaque canvas. Ordinary drawing
+uses only canvas and stack memory; only canvas creation and polygons above 64
+vertices allocate. The PPM routines are the only ones that touch the file
+system.
 
-## Drawing
+Many Kilix games draw each frame into a canvas, pack it with
+`sr_pack_rgba()`, and hand it to a presenter such as
+[kitty-framebuffer](https://github.com/itsmygithubacct/kitty-framebuffer#readme),
+which sends it to the terminal over the Kitty graphics protocol.
 
-All primitive coordinates are floats measured in pixels; edges falling
-between pixel centers receive fractional-coverage anti-aliasing.
+The full API, with the pixel-format and overlap rules, is in
+[docs/api.md](docs/api.md).
 
-- `sr_fill_rect` — axis-aligned rectangle with anti-aliased edges.
-- `sr_stroke_rect` — rectangle outline built from four bars.
-- `sr_fill_circle` — filled disc with an anti-aliased rim.
-- `sr_fill_ellipse` — filled ellipse with an anti-aliased rim.
-- `sr_ring` — circle outline of a given stroke width.
-- `sr_line` — stroked segment with round caps and coverage from the
-  distance to the segment; `dash_on`/`dash_off` give a dash pattern in
-  pixels (`0, 0` for solid).
-- `sr_fill_triangle` — filled triangle via edge functions, either winding.
-- `sr_fill_convex` — filled convex polygon from parallel coordinate arrays.
-- `sr_fill_polygon` — filled polygon, concave permitted, via even-odd
-  scanlines. Winding-independent, half-open spans so adjacent polygons tile
-  without a seam, and cheaper than `sr_fill_convex` on any polygon of size.
+## Documentation
 
-### Graph primitives
+- [docs/api.md](docs/api.md): the C API reference (pixel format, canvas,
+  drawing, graph primitives, text, blits and scaling, PPM images).
+- [docs/building.md](docs/building.md): build, test, sanitizer, benchmark,
+  Python and install targets.
+- [python/README.md](python/README.md): the `soft-raster-py` Python binding.
+- [CHANGELOG.md](CHANGELOG.md): release history.
 
-Four additions for drawing graphs, diagrams and charts, where a shape is a
-*chain* of segments rather than one, and where hard polygon edges sit next to
-anti-aliased circles.
+## Related repositories
 
-- `sr_polyline` — strokes a whole chain as one shape. Stroking a chain with
-  one `sr_line` per segment is wrong twice over: each call blends
-  independently, so a shared vertex is blended twice (at alpha 0.5 a plain
-  pixel lands on 127 and the joint on 191, a dark bead at every bend), and the
-  dash phase restarts at every vertex. `sr_polyline` takes coverage as the
-  maximum over the segments, so every pixel blends once and interior vertices
-  become round joins, and it measures the dash phase along the whole path plus
-  a `dash_offset`. Two points with `SR_CAP_ROUND` and no dash draw exactly what
-  `sr_line` draws. Caps (`SR_CAP_ROUND`, `SR_CAP_BUTT`, `SR_CAP_SQUARE`) apply
-  only to the two free ends.
-- `sr_fill_polygon_aa` — the anti-aliased sibling of `sr_fill_polygon`. The
-  center-sampling fills produce coverage of 0 or 255 and nothing between, which
-  reads as a defect beside `sr_fill_circle`'s smooth rim — exactly the pairing
-  an arrowhead on an edge into a round node makes. Four sub-scanlines per row
-  with exact horizontal span overlap, at about four times the cost.
-- `sr_fill_round_rect` / `sr_stroke_round_rect` — the default node shape of
-  every modern diagram, and the one shape that cannot be assembled from the
-  existing primitives without seams where the bars meet the corner arcs.
-  Coverage comes from the exact signed distance, so both edges are
-  anti-aliased. The stroke is centered on the outline, like `sr_ring`.
-- `sr_flatten_cubic` — adaptive subdivision of a cubic Bézier into points for
-  `sr_polyline`, so a routed edge can be a curve. Call it with capacity 0 to
-  size a buffer; the result is bounded by 1025 points.
+Projects that pin or vendor `soft-raster`:
 
-## Text
+- [kilix-game-sdk](https://github.com/itsmygithubacct/kilix-game-sdk#readme)
+  pins it at `kilix-game-kit/third_party/soft-raster`; its renderers and
+  `kilix-ui` reuse that checkout. The Kitty-graphics games built on the SDK
+  draw through it: the graphical games in [kilix-games](https://github.com/itsmygithubacct/kilix-games#readme),
+  [pleb-tower](https://github.com/itsmygithubacct/pleb-tower#readme),
+  [super-kilix](https://github.com/itsmygithubacct/super-kilix#readme),
+  [pleb-plant-grower](https://github.com/itsmygithubacct/pleb-plant-grower#readme)
+  and [kilix-land](https://github.com/itsmygithubacct/kilix-land#readme).
+- [kilix-techno](https://github.com/itsmygithubacct/kilix-techno#readme),
+  [kilix-playalong](https://github.com/itsmygithubacct/kilix-playalong#readme),
+  [kilix-rtsp](https://github.com/itsmygithubacct/kilix-rtsp#readme),
+  [kilix-sound-detect](https://github.com/itsmygithubacct/kilix-sound-detect#readme)
+  and [kilix-mask](https://github.com/itsmygithubacct/kilix-mask#readme) pin it
+  directly at `third_party/soft-raster`.
+- [kilix-graphs](https://github.com/itsmygithubacct/kilix-graphs#readme) uses
+  the Python binding for its optional pixel backend.
+- [bash-os](https://github.com/itsmygithubacct/bash-os#readme) carries a
+  vendored copy under `loadables/_soft_raster/`.
 
-`sr_text`, `sr_text_center`, `sr_text_outlined`, and `sr_text_shadow` retain
-the original fixed 8x16 console font at an integer scale factor (clamped to at
-least 1). The `sr_*_in()` variants select either that face or the compact 7x14
-face per call. Characters outside ASCII 32..126 render as `?`. Font metrics,
-string widths, and bitmap rows are available through `sr_font_advance()`,
-`sr_font_height()`, `sr_text_width_in()`, and `sr_font_glyph_in()`.
+Frames drawn with it are usually presented by
+[kitty-framebuffer](https://github.com/itsmygithubacct/kitty-framebuffer#readme)
+through [kitty-terminal-session](https://github.com/itsmygithubacct/kitty-terminal-session#readme).
 
-## Blits and scaling
+## Part of Plebian-OS
 
-- `sr_blit` — verbatim clipped copy, alpha byte included.
-- `sr_blit_alpha` — composites the source over the destination using each
-  pixel's alpha byte times a uniform alpha.
-- `sr_blit_tint` — like `sr_blit_alpha` but replaces the source color,
-  using source alpha purely as a mask.
-- `sr_blit_scaled` — nearest-neighbor resample into a destination
-  rectangle, composited like `sr_blit_alpha`.
-- `sr_blit_transformed` — whole-source alpha composite with any combination
-  of horizontal, vertical, and diagonal-exchange flags. Diagonal exchange
-  runs first and swaps the output dimensions; optional tint uses source alpha
-  as a mask. The flag values match Tiled's compact transform order.
-- `sr_scale_canvas` — scales the whole source onto the destination with
-  nearest-neighbor sampling, preserving aspect ratio, centered, with
-  opaque black letterbox bars.
-
-The unscaled `sr_blit`, `sr_blit_alpha`, and `sr_blit_tint` calls support
-overlap within the same canvas. Scaled, transformed, and letterbox operations
-require non-overlapping source and destination storage.
-
-## PPM images
-
-`sr_load_ppm()` reads a binary P6 PPM into an owned canvas, including files
-whose headers contain comments. `sr_write_ppm()` writes the canvas with the
-alpha byte dropped. These are handy for small sprite assets, debugging, and
-golden-image tests; they are the only routines that touch the file system.
+soft-raster is one of the repositories behind
+[Plebian-OS](https://github.com/itsmygithubacct/plebian-os#readme), a Debian
+install whose desktop is [Kilix](https://github.com/itsmygithubacct/kilix#readme)
+running the [Kilix 95](https://github.com/itsmygithubacct/kilix-95#readme)
+desktop through [Pleb](https://github.com/itsmygithubacct/pleb#readme).
+It reaches a user compiled into the Kilix games and apps that pin it, which
+install on demand from the Kilix content catalog. The map of every repository
+and how it ships is on the
+[components page](https://github.com/itsmygithubacct/plebian-os/blob/main/docs/components.md).
 
 ## Font
 
@@ -199,19 +152,6 @@ copyright file states that all console fonts are public domain by nature.
 The Fixed typeface descends from the public-domain X11 misc-fixed fonts;
 out of caution, the permissive notice from that lineage is preserved in the
 header.
-
-## Install
-
-```sh
-make install PREFIX=/usr/local
-```
-
-The build produces static and shared libraries. Applications may instead
-compile `src/soft_raster.c` directly. The library depends only on the C
-standard library and `libm`; nothing in it requires POSIX.
-
-The API is pre-1.0 and may change between minor releases. Version 0.4.0 adds
-direct RGB packing and selectable font APIs without changing existing calls.
 
 ## License
 
