@@ -6,13 +6,14 @@ shapes, bitmap text and alpha sprites into 32-bit framebuffers.
 It is not installed on its own. Kilix games and terminal apps pin it as a Git
 submodule (most of them through
 [kilix-game-sdk](https://github.com/itsmygithubacct/kilix-game-sdk#readme))
-and compile it into their binaries; those games and apps install on demand from
-the Kilix content catalog.
+and compile it into their binaries; those games and apps install on demand,
+from the Kilix content catalog or the first time a Kilix command needs them.
 
 ## What it does
 
-- Draws anti-aliased rectangles, circles, ellipses, rings, dashed lines,
-  triangles and convex or concave polygons, all clipped to a canvas clip rectangle.
+- Draws anti-aliased rectangles, circles, ellipses, rings and dashed lines, and
+  hard-edged triangles and convex or concave polygons, all clipped to a canvas
+  clip rectangle.
 - Strokes poly-lines as one shape (round joins, chosen end caps, a dash phase
   along the whole path), fills rounded rectangles and anti-aliased polygons, and
   flattens cubic Bézier curves: the primitives a graph or diagram needs.
@@ -75,8 +76,9 @@ the library.
 
 A canvas is a row-major array of `uint32_t` pixels in `0xAARRGGBB` order,
 either allocated by `sr_canvas_init()` or wrapped around memory the caller
-already owns. Drawing calls take float pixel coordinates; an edge that falls
-between pixel centres gets fractional coverage, which is quantised to 1/256
+already owns. Drawing calls take float pixel coordinates; except in the
+hard-edged triangle and polygon fills, which sample pixel centres, an edge that
+falls between pixel centres gets fractional coverage, which is quantised to 1/256
 steps and blended toward the colour. Drawing on a transparent canvas therefore
 builds a premultiplied-alpha sprite, which the blit calls composite over another
 canvas.
@@ -84,9 +86,11 @@ canvas.
 The code was extracted from the renderer the terminal-lander family of games
 used to duplicate in every game, with the blending maths kept identical, so
 frames match those games byte for byte on an opaque canvas. Ordinary drawing
-uses only canvas and stack memory; only canvas creation and polygons above 64
-vertices allocate. The PPM routines are the only ones that touch the file
-system.
+uses only canvas and stack memory. Canvas creation allocates, and so do large
+shapes: polygons above 64 vertices, poly-lines above 128 points, and
+anti-aliased polygon fills or poly-lines whose clipped bounds are wider than
+4096 pixels take a temporary buffer. The PPM routines are the only ones that
+touch the file system.
 
 Many Kilix games draw each frame into a canvas, pack it with
 `sr_pack_rgba()`, and hand it to a presenter such as
@@ -140,8 +144,8 @@ install whose desktop is [Kilix](https://github.com/itsmygithubacct/kilix#readme
 running the [Kilix 95](https://github.com/itsmygithubacct/kilix-95#readme)
 desktop through [Pleb](https://github.com/itsmygithubacct/pleb#readme).
 It reaches a user compiled into the Kilix games and apps that pin it, which
-install on demand from the Kilix content catalog. The map of every repository
-and how it ships is on the
+install on demand from the Kilix content catalog or on first use of a Kilix
+command. The map of every repository and how it ships is on the
 [components page](https://github.com/itsmygithubacct/plebian-os/blob/main/docs/components.md).
 
 ## Font
